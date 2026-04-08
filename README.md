@@ -12,10 +12,10 @@ Same machine / local dev: you can still build from **`trio-pebble/remote-app/`**
 ## First-time setup
 
 1. Copy **`resources/images/menu_icon.png`** from **`trio-pebble`** (25×25 PNG) into this repo at the same path. Without it, `pebble build` will fail on the menu icon resource.
-2. Create an **empty** GitHub repository named e.g. **`trio-pebble-remote`** (no README/license). Then:
+2. If this repo is not on GitHub yet, create an empty repo **`trio-pebble-remote`**, then:
    ```bash
    cd /path/to/trio-pebble-remote
-   git remote add origin https://github.com/<you>/trio-pebble-remote.git
+   git remote add origin https://github.com/MinimusClawdius/trio-pebble-remote.git
    git push -u origin main
    ```
 3. In CloudPebble: **New project → Import from GitHub** → select **`trio-pebble-remote`**.
