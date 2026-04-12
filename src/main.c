@@ -4,6 +4,7 @@
 static void inbox_received(DictionaryIterator *iter, void *context) {
     (void)iter;
     (void)context;
+    /* Optional: show KEY_CMD_STATUS on watch — v1 ignores (phone confirms in Trio). */
 }
 
 static void init(void) {

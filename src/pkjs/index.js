@@ -65,6 +65,10 @@ function saveSettings() {
     } catch (e) { /* ok */ }
 }
 
+function displayUnitsForWatch() {
+    return settings.glucoseUnits === 'mmol' ? 'mmol' : 'mgdl';
+}
+
 function payloadGet(p, keyNum) {
     if (!p) return undefined;
     var k = keyNum | 0;

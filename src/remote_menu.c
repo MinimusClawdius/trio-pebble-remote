@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Must match package.json messageKeys and the Trio watchface (trio-pebble) trio_types.h */
+/* Must match both package.json messageKeys and watchface trio_types.h */
 enum {
     KEY_CMD_TYPE = 7,
     KEY_CMD_AMOUNT = 8,
@@ -150,6 +150,10 @@ static void open_amount_picker(int32_t cmd_type) {
     window_stack_push(s_pick_window, true);
 }
 
+/**
+ * Watch app: keep menu under picker so BACK from picker returns to menu.
+ * (Watchface pops menu first so the face shows behind the picker.)
+ */
 static void menu_select_cb(int index, void *context) {
     (void)context;
     if (index == 2) {
