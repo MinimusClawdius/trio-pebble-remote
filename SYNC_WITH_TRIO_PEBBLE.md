@@ -16,6 +16,8 @@ When editing the **Trio** watchface repo, mirror these into **this** repo if the
 4. **Menu icon**
    - `resources/images/menu_icon.png` — same 25×25 asset as `trio-pebble`.
 
-Optional: from `trio-pebble` repo root, after editing `remote-app/`, copy into this repo:
+From **`trio-pebble`** repo root (Windows):
 
-`remote-app/src` → `src` (overwrite), then adjust paths if any.
+`pwsh -File scripts/sync-trio-pebble-remote.ps1`
+
+That copies `remote-app/package.json`, `wscript`, and `remote-app/src/` into this repo. You still need **`resources/images/menu_icon.png`** here (not copied by the script).

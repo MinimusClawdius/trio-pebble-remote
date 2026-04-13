@@ -83,7 +83,8 @@ function httpPost(url, body, callback) {
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.timeout = 15000;
     xhr.onload = function () {
-        callback(xhr.status === 200 ? xhr.responseText : null);
+        // Trio returns 202 Accepted for queued bolus/carbs (pending confirmation).
+        callback(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : null);
     };
     xhr.onerror = function () { callback(null); };
     xhr.ontimeout = function () { callback(null); };
