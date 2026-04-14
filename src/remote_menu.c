@@ -23,6 +23,27 @@ static TextLayer *s_pick_hint;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
 
+static int32_t s_default_bolus_tenths = 20;
+static int32_t s_default_carb_g = 15;
+static int32_t s_step_bolus_tenths = 1;
+static int32_t s_step_carb_g = 5;
+
+void remote_menu_apply_phone_defaults(int32_t default_bolus_tenths, int32_t default_carb_g,
+                                      int32_t bolus_step_tenths, int32_t carb_step_g) {
+    if (default_bolus_tenths > 0 && default_bolus_tenths <= 300) {
+        s_default_bolus_tenths = default_bolus_tenths;
+    }
+    if (default_carb_g > 0 && default_carb_g <= 250) {
+        s_default_carb_g = default_carb_g;
+    }
+    if (bolus_step_tenths > 0 && bolus_step_tenths <= 50) {
+        s_step_bolus_tenths = bolus_step_tenths;
+    }
+    if (carb_step_g > 0 && carb_step_g <= 25) {
+        s_step_carb_g = carb_step_g;
+    }
+}
+
 void remote_menu_send_to_phone(int32_t cmd_type, int32_t amount) {
     DictionaryIterator *iter;
     if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
@@ -61,12 +82,12 @@ static void picker_up_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount < 300) {
-            s_pick_amount++;
+        if (s_pick_amount <= 300 - s_step_bolus_tenths) {
+            s_pick_amount += s_step_bolus_tenths;
         }
     } else {
-        if (s_pick_amount < 250) {
-            s_pick_amount += 5;
+        if (s_pick_amount <= 250 - s_step_carb_g) {
+            s_pick_amount += s_step_carb_g;
         }
     }
     picker_refresh_value_text();
@@ -76,12 +97,16 @@ static void picker_down_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount > 1) {
-            s_pick_amount--;
+        if (s_pick_amount > s_step_bolus_tenths) {
+            s_pick_amount -= s_step_bolus_tenths;
+        } else if (s_pick_amount > 1) {
+            s_pick_amount = 1;
         }
     } else {
-        if (s_pick_amount > 5) {
-            s_pick_amount -= 5;
+        if (s_pick_amount > s_step_carb_g) {
+            s_pick_amount -= s_step_carb_g;
+        } else if (s_pick_amount > 1) {
+            s_pick_amount = 1;
         }
     }
     picker_refresh_value_text();
@@ -116,7 +141,7 @@ static void pick_window_load(Window *window) {
     text_layer_set_background_color(s_pick_hint, GColorClear);
     text_layer_set_text_alignment(s_pick_hint, GTextAlignmentCenter);
     text_layer_set_font(s_pick_hint, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text(s_pick_hint, "UP/DOWN adjust\nSELECT review");
+    text_layer_set_text(s_pick_hint, "UP/DOWN adjust\nSELECT → confirm\n2× UP sends there");
     layer_add_child(root, text_layer_get_layer(s_pick_hint));
 
     window_set_click_config_provider(window, picker_click_config);
@@ -147,9 +172,9 @@ static void push_amount_picker(int32_t cmd_type, int32_t amount) {
 
 static void open_amount_picker(int32_t cmd_type) {
     if (cmd_type == 1) {
-        push_amount_picker(1, 20);
+        push_amount_picker(1, s_default_bolus_tenths);
     } else {
-        push_amount_picker(2, 15);
+        push_amount_picker(2, s_default_carb_g);
     }
 }
 
@@ -184,12 +209,12 @@ static void menu_window_load(Window *window) {
 
     s_menu_items[0] = (SimpleMenuItem){
         .title = "Remote bolus",
-        .subtitle = "0.1 U",
+        .subtitle = "Picker defaults",
         .callback = menu_select_cb,
     };
     s_menu_items[1] = (SimpleMenuItem){
         .title = "Remote carbs",
-        .subtitle = "5 g",
+        .subtitle = "Phone app settings",
         .callback = menu_select_cb,
     };
     s_menu_items[2] = (SimpleMenuItem){

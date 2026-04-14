@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* remote_dialog_*.png — tick/cross/confirm from https://github.com/pebble-examples/ui-patterns
+/* tick/cross icons from pebble-examples/ui-patterns. Bolus/carb art is drawn (animated) on a light panel.
  * Layout uses safe insets on round (chalk) and letterboxes on tall/wide rectangular (emery). */
 
 /* Progress animation (see Pebble progress_layer example). */
@@ -17,15 +17,17 @@ static int32_t s_pending_cmd_type;
 static int32_t s_pending_amount;
 
 static Window *s_confirm_window;
-static BitmapLayer *s_confirm_icon_layer;
+static Layer *s_confirm_art_layer;
 static TextLayer *s_confirm_title_layer;
 static TextLayer *s_confirm_amount_layer;
+static TextLayer *s_confirm_hint_layer;
 static ActionBarLayer *s_confirm_action_bar;
-static GBitmap *s_confirm_icon_bitmap;
 static GBitmap *s_confirm_tick_bitmap;
 static GBitmap *s_confirm_cross_bitmap;
 static char s_confirm_title_buf[24];
 static char s_confirm_amount_buf[24];
+static AppTimer *s_confirm_anim_timer;
+static uint8_t s_confirm_anim_frame;
 
 static Window *s_progress_window;
 static Layer *s_progress_bg_layer;
@@ -213,7 +215,71 @@ static void begin_progress_and_send(void) {
     remote_menu_send_to_phone(s_pending_cmd_type, s_pending_amount);
 }
 
-static void confirm_click_up(ClickRecognizerRef recognizer, void *context) {
+static void confirm_cancel_anim_timer(void) {
+    if (s_confirm_anim_timer) {
+        app_timer_cancel(s_confirm_anim_timer);
+        s_confirm_anim_timer = NULL;
+    }
+}
+
+static void confirm_anim_timer_cb(void *data) {
+    (void)data;
+    s_confirm_anim_frame++;
+    if (s_confirm_art_layer) {
+        layer_mark_dirty(s_confirm_art_layer);
+    }
+    s_confirm_anim_timer = app_timer_register(130, confirm_anim_timer_cb, NULL);
+}
+
+static void confirm_art_update_proc(Layer *layer, GContext *ctx) {
+    GRect r = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, r, 0, GCornerNone);
+
+    int w = r.size.w;
+    int h = r.size.h;
+    int cx = w / 2;
+    int cy = h / 2;
+
+    graphics_context_set_fill_color(ctx, GColorBlack);
+
+    if (s_pending_cmd_type == 1) {
+        /* Syringe (horizontal) + droplet */
+        graphics_fill_rect(ctx, GRect(cx - 38, cy - 7, 46, 14), 3, GCornersAll);
+        graphics_fill_rect(ctx, GRect(cx - 46, cy - 5, 10, 10), 2, GCornersAll);
+        graphics_fill_rect(ctx, GRect(cx - 56, cy - 2, 12, 4), 0, GCornerNone);
+        graphics_fill_rect(ctx, GRect(cx + 8, cy - 2, 22, 4), 0, GCornerNone);
+        int ph = (int)(s_confirm_anim_frame % 14);
+        int drop_y = cy + 10 + ph * 2;
+        if (drop_y > h - 8) {
+            drop_y = cy + 10;
+        }
+        graphics_fill_rect(ctx, GRect(cx + 24, drop_y, 7, 8), 3, GCornersAll);
+    } else {
+        /* Plate + food moving toward mouth */
+#ifdef PBL_COLOR
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 26);
+        graphics_context_set_fill_color(ctx, GColorLightGray);
+        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 22);
+#else
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 26);
+        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 22);
+#endif
+        graphics_context_set_stroke_color(ctx, GColorBlack);
+        graphics_draw_line(ctx, GPoint((int16_t)(cx - 16), (int16_t)(cy - 18)), GPoint((int16_t)(cx + 16), (int16_t)(cy - 14)));
+        {
+            int t = (int)(s_confirm_anim_frame % 16);
+            int fx = cx - 8 + (t * 20) / 15;
+            int fy = cy + 18 - (t * 16) / 15;
+            graphics_fill_rect(ctx, GRect(fx, fy, 9, 8), 2, GCornersAll);
+        }
+    }
+}
+
+static void confirm_double_up_send(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     for (int i = 0; i < s_confirm_send_pops; i++) {
@@ -230,8 +296,8 @@ static void confirm_click_down(ClickRecognizerRef recognizer, void *context) {
 
 static void confirm_action_bar_click_config(void *context) {
     (void)context;
-    /* Frozen CloudPebble SDK: window_single_click_subscribe(button, handler) — two args only. */
-    window_single_click_subscribe(BUTTON_ID_UP, confirm_click_up);
+    /* Two quick presses on UP to send (Rebble / CloudPebble: 2-arg click handlers). */
+    window_multi_click_subscribe(BUTTON_ID_UP, 2, 2, 450, true, confirm_double_up_send);
     window_single_click_subscribe(BUTTON_ID_DOWN, confirm_click_down);
 }
 
@@ -241,9 +307,9 @@ static void confirm_window_load(Window *window) {
     GRect blk = remote_send_layout_block(&bounds);
 
 #ifdef PBL_COLOR
-    window_set_background_color(window, GColorJaegerGreen);
+    window_set_background_color(window, GColorWhite);
 #else
-    window_set_background_color(window, GColorBlack);
+    window_set_background_color(window, GColorWhite);
 #endif
 
     if (s_pending_cmd_type == 1) {
@@ -255,29 +321,34 @@ static void confirm_window_load(Window *window) {
         snprintf(s_confirm_amount_buf, sizeof(s_confirm_amount_buf), "%ld g", (long)s_pending_amount);
     }
 
-    s_confirm_icon_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_CONFIRM);
 #ifdef PBL_ROUND
-    const GEdgeInsets icon_insets = {.top = 6, .right = 32, .bottom = 56, .left = 20};
-    const GEdgeInsets title_insets = {.top = 68, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
-    const GEdgeInsets amt_insets = {.top = 94, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets art_insets = {.top = 8, .right = 36, .bottom = 88, .left = 22};
+    const GEdgeInsets title_insets = {.top = 62, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets amt_insets = {.top = 86, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets hint_insets = {.top = 112, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
     const char *title_font = FONT_KEY_GOTHIC_18_BOLD;
     const char *amount_font = FONT_KEY_GOTHIC_24_BOLD;
 #else
-    const GEdgeInsets icon_insets = {.top = 4, .right = 28, .bottom = 52, .left = 14};
-    const GEdgeInsets title_insets = {.top = 86, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
-    const GEdgeInsets amt_insets = {.top = 116, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets art_insets = {.top = 6, .right = 30, .bottom = 78, .left = 14};
+    const GEdgeInsets title_insets = {.top = 78, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets amt_insets = {.top = 104, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets hint_insets = {.top = 132, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
     const char *title_font = FONT_KEY_GOTHIC_24_BOLD;
     const char *amount_font = FONT_KEY_GOTHIC_24_BOLD;
 #endif
-    s_confirm_icon_layer = bitmap_layer_create(grect_inset(blk, icon_insets));
-    bitmap_layer_set_bitmap(s_confirm_icon_layer, s_confirm_icon_bitmap);
-    bitmap_layer_set_compositing_mode(s_confirm_icon_layer, GCompOpSet);
-    layer_add_child(root, bitmap_layer_get_layer(s_confirm_icon_layer));
+    GRect art_rect = grect_inset(blk, art_insets);
+    s_confirm_art_layer = layer_create(art_rect);
+    layer_set_update_proc(s_confirm_art_layer, confirm_art_update_proc);
+    layer_add_child(root, s_confirm_art_layer);
+
+    s_confirm_anim_frame = 0;
+    confirm_cancel_anim_timer();
+    s_confirm_anim_timer = app_timer_register(130, confirm_anim_timer_cb, NULL);
 
     s_confirm_title_layer = text_layer_create(grect_inset(blk, title_insets));
     text_layer_set_text(s_confirm_title_layer, s_confirm_title_buf);
     text_layer_set_background_color(s_confirm_title_layer, GColorClear);
-    text_layer_set_text_color(s_confirm_title_layer, GColorWhite);
+    text_layer_set_text_color(s_confirm_title_layer, GColorBlack);
     text_layer_set_text_alignment(s_confirm_title_layer, GTextAlignmentCenter);
     text_layer_set_font(s_confirm_title_layer, fonts_get_system_font(title_font));
     layer_add_child(root, text_layer_get_layer(s_confirm_title_layer));
@@ -285,10 +356,18 @@ static void confirm_window_load(Window *window) {
     s_confirm_amount_layer = text_layer_create(grect_inset(blk, amt_insets));
     text_layer_set_text(s_confirm_amount_layer, s_confirm_amount_buf);
     text_layer_set_background_color(s_confirm_amount_layer, GColorClear);
-    text_layer_set_text_color(s_confirm_amount_layer, GColorWhite);
+    text_layer_set_text_color(s_confirm_amount_layer, GColorBlack);
     text_layer_set_text_alignment(s_confirm_amount_layer, GTextAlignmentCenter);
     text_layer_set_font(s_confirm_amount_layer, fonts_get_system_font(amount_font));
     layer_add_child(root, text_layer_get_layer(s_confirm_amount_layer));
+
+    s_confirm_hint_layer = text_layer_create(grect_inset(blk, hint_insets));
+    text_layer_set_text(s_confirm_hint_layer, "Double-tap UP to send");
+    text_layer_set_background_color(s_confirm_hint_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_hint_layer, GColorDarkGray);
+    text_layer_set_text_alignment(s_confirm_hint_layer, GTextAlignmentCenter);
+    text_layer_set_font(s_confirm_hint_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    layer_add_child(root, text_layer_get_layer(s_confirm_hint_layer));
 
     s_confirm_tick_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_TICK);
     s_confirm_cross_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_CROSS);
@@ -301,9 +380,14 @@ static void confirm_window_load(Window *window) {
 
 static void confirm_window_unload(Window *window) {
     (void)window;
+    confirm_cancel_anim_timer();
     if (s_confirm_action_bar) {
         action_bar_layer_destroy(s_confirm_action_bar);
         s_confirm_action_bar = NULL;
+    }
+    if (s_confirm_hint_layer) {
+        text_layer_destroy(s_confirm_hint_layer);
+        s_confirm_hint_layer = NULL;
     }
     if (s_confirm_title_layer) {
         text_layer_destroy(s_confirm_title_layer);
@@ -313,13 +397,9 @@ static void confirm_window_unload(Window *window) {
         text_layer_destroy(s_confirm_amount_layer);
         s_confirm_amount_layer = NULL;
     }
-    if (s_confirm_icon_layer) {
-        bitmap_layer_destroy(s_confirm_icon_layer);
-        s_confirm_icon_layer = NULL;
-    }
-    if (s_confirm_icon_bitmap) {
-        gbitmap_destroy(s_confirm_icon_bitmap);
-        s_confirm_icon_bitmap = NULL;
+    if (s_confirm_art_layer) {
+        layer_destroy(s_confirm_art_layer);
+        s_confirm_art_layer = NULL;
     }
     if (s_confirm_tick_bitmap) {
         gbitmap_destroy(s_confirm_tick_bitmap);
@@ -347,11 +427,7 @@ static void toast_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
     GRect safe = remote_send_safe_bounds(&b);
-#ifdef PBL_COLOR
-    window_set_background_color(window, GColorJaegerGreen);
-#else
-    window_set_background_color(window, GColorBlack);
-#endif
+    window_set_background_color(window, GColorWhite);
 
     int16_t mid_y = (int16_t)(safe.origin.y + (safe.size.h - 72) / 2);
     if (mid_y < safe.origin.y) {
@@ -359,14 +435,14 @@ static void toast_window_load(Window *window) {
     }
     s_toast_line1 = text_layer_create(GRect(safe.origin.x + 6, mid_y, safe.size.w - 12, 32));
     text_layer_set_background_color(s_toast_line1, GColorClear);
-    text_layer_set_text_color(s_toast_line1, GColorWhite);
+    text_layer_set_text_color(s_toast_line1, GColorBlack);
     text_layer_set_text_alignment(s_toast_line1, GTextAlignmentCenter);
     text_layer_set_font(s_toast_line1, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
     layer_add_child(root, text_layer_get_layer(s_toast_line1));
 
     s_toast_line2 = text_layer_create(GRect(safe.origin.x + 6, (int16_t)(mid_y + 34), safe.size.w - 12, 40));
     text_layer_set_background_color(s_toast_line2, GColorClear);
-    text_layer_set_text_color(s_toast_line2, GColorWhite);
+    text_layer_set_text_color(s_toast_line2, GColorDarkGray);
     text_layer_set_text_alignment(s_toast_line2, GTextAlignmentCenter);
     text_layer_set_font(s_toast_line2, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     layer_add_child(root, text_layer_get_layer(s_toast_line2));

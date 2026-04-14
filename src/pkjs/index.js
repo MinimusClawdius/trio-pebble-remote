@@ -1,4 +1,4 @@
-// Trio Remote — minimal PebbleKit JS (must match watchface message key indices)
+// Trio Remote — PebbleKit JS (message key indices must match package.json)
 var K = {
     GLUCOSE: 0, TREND: 1, DELTA: 2, IOB: 3, COB: 4,
     LAST_LOOP: 5, GLUCOSE_STALE: 6, CMD_TYPE: 7, CMD_AMOUNT: 8,
@@ -20,38 +20,37 @@ var K = {
     CONFIG_CLOCK_24H: 41,
     CONFIG_GRAPH_SCALE_MODE: 42,
     CONFIG_GRAPH_TIME_RANGE: 43,
-    TRIO_LINK: 44
+    TRIO_LINK: 44,
+    SUGGESTED_BOLUS_TENTHS: 45,
+    REMOTE_DEFAULT_BOLUS_TENTHS: 46,
+    REMOTE_DEFAULT_CARB_G: 47,
+    REMOTE_BOLUS_STEP_TENTHS: 48,
+    REMOTE_CARB_STEP_G: 49
 };
 
+/** Only settings used by Trio Remote (not the full watchface config). */
 var settings = {
-    dataSource: 0,
     trioHost: 'http://127.0.0.1:8080',
-    faceType: 0,
-    colorScheme: 0,
-    highThreshold: 180,
-    lowThreshold: 70,
-    urgentLow: 55,
-    alertHighEnabled: true,
-    alertLowEnabled: true,
-    alertSnoozeMin: 15,
-    weatherEnabled: true,
-    glucoseUnits: 'mgdl',
-    compSlot0: 1,
-    compSlot1: 5,
-    compSlot2: 6,
-    compSlot3: 0,
-    clock24h: true,
-    graphScaleMode: 0,
-    graphTimeRange: 0
+    dataSource: 0,
+    remoteDefaultBolusTenths: 20,
+    remoteDefaultCarbG: 15,
+    remoteBolusStepTenths: 1,
+    remoteCarbStepG: 5
 };
+
+/** Minimal settings page (served from this repo on GitHub raw). */
+var REMOTE_SETTINGS_URL =
+    'https://raw.githubusercontent.com/MinimusClawdius/trio-pebble-remote/main/src/pkjs/remote_settings.html';
 
 function loadSettings() {
     try {
-        var saved = localStorage.getItem('trio_settings');
+        var saved = localStorage.getItem('trio_remote_settings');
         if (saved) {
             var parsed = JSON.parse(saved);
             for (var key in parsed) {
-                if (parsed.hasOwnProperty(key)) settings[key] = parsed[key];
+                if (parsed.hasOwnProperty(key) && settings.hasOwnProperty(key)) {
+                    settings[key] = parsed[key];
+                }
             }
         }
     } catch (e) {
@@ -61,12 +60,19 @@ function loadSettings() {
 
 function saveSettings() {
     try {
-        localStorage.setItem('trio_settings', JSON.stringify(settings));
+        localStorage.setItem('trio_remote_settings', JSON.stringify(settings));
     } catch (e) { /* ok */ }
 }
 
-function displayUnitsForWatch() {
-    return settings.glucoseUnits === 'mmol' ? 'mmol' : 'mgdl';
+function pushDefaultsToWatch() {
+    var m = {};
+    m[K.REMOTE_DEFAULT_BOLUS_TENTHS] = settings.remoteDefaultBolusTenths | 0;
+    m[K.REMOTE_DEFAULT_CARB_G] = settings.remoteDefaultCarbG | 0;
+    m[K.REMOTE_BOLUS_STEP_TENTHS] = settings.remoteBolusStepTenths | 0;
+    m[K.REMOTE_CARB_STEP_G] = settings.remoteCarbStepG | 0;
+    Pebble.sendAppMessage(m, function () { }, function (e) {
+        console.log('Trio Remote: send defaults failed ' + e);
+    });
 }
 
 function payloadGet(p, keyNum) {
@@ -83,7 +89,6 @@ function httpPost(url, body, callback) {
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.timeout = 15000;
     xhr.onload = function () {
-        // Trio returns 202 Accepted for queued bolus/carbs (pending confirmation).
         callback(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : null);
     };
     xhr.onerror = function () { callback(null); };
@@ -121,12 +126,9 @@ function sendCommand(type, amount) {
     });
 }
 
-var TRIO_CONFIG_PAGE_URL =
-    'https://minimusclawdius.github.io/trio-pebble/config/index.html';
-
 Pebble.addEventListener('showConfiguration', function () {
     var params = encodeURIComponent(JSON.stringify(settings));
-    Pebble.openURL(TRIO_CONFIG_PAGE_URL + '#' + params);
+    Pebble.openURL(REMOTE_SETTINGS_URL + '#' + params);
 });
 
 Pebble.addEventListener('webviewclosed', function (e) {
@@ -134,9 +136,12 @@ Pebble.addEventListener('webviewclosed', function (e) {
         try {
             var newSettings = JSON.parse(decodeURIComponent(e.response));
             for (var key in newSettings) {
-                if (newSettings.hasOwnProperty(key)) settings[key] = newSettings[key];
+                if (newSettings.hasOwnProperty(key) && settings.hasOwnProperty(key)) {
+                    settings[key] = newSettings[key];
+                }
             }
             saveSettings();
+            pushDefaultsToWatch();
         } catch (ex) {
             console.log('Trio Remote: config parse error: ' + ex);
         }
@@ -156,4 +161,5 @@ Pebble.addEventListener('appmessage', function (e) {
 Pebble.addEventListener('ready', function () {
     console.log('Trio Remote pkjs ready');
     loadSettings();
+    pushDefaultsToWatch();
 });
