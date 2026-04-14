@@ -1,5 +1,6 @@
 #include "remote_send_ui.h"
-#include "remote_menu.h"
+/* ../ = src/ or src/c/ (CloudPebble) — not same dir as this file in modules/ */
+#include "../remote_menu.h"
 #include <stdio.h>
 #include <string.h>
 

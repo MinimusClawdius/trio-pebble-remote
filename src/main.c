@@ -1,6 +1,6 @@
 #include <pebble.h>
 #include "remote_menu.h"
-#include "remote_send_ui.h"
+#include "modules/remote_send_ui.h"
 
 enum {
     KEY_CMD_STATUS = 9,
