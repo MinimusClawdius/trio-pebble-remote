@@ -1,0 +1,505 @@
+#include "remote_send_ui.h"
+#include "remote_menu.h"
+#include <stdio.h>
+#include <string.h>
+
+/* remote_dialog_*.png — tick/cross/confirm from https://github.com/pebble-examples/ui-patterns
+ * Layout uses safe insets on round (chalk) and letterboxes on tall/wide rectangular (emery). */
+
+/* Progress animation (see Pebble progress_layer example). */
+#define PROGRESS_TICK_MS 55
+#define PROGRESS_IDLE_CAP 92
+#define PROGRESS_TIMEOUT_MS 14000
+#define TOAST_DISPLAY_MS 1100
+
+static int32_t s_pending_cmd_type;
+static int32_t s_pending_amount;
+
+static Window *s_confirm_window;
+static BitmapLayer *s_confirm_icon_layer;
+static TextLayer *s_confirm_title_layer;
+static TextLayer *s_confirm_amount_layer;
+static ActionBarLayer *s_confirm_action_bar;
+static GBitmap *s_confirm_icon_bitmap;
+static GBitmap *s_confirm_tick_bitmap;
+static GBitmap *s_confirm_cross_bitmap;
+static char s_confirm_title_buf[24];
+static char s_confirm_amount_buf[24];
+
+static Window *s_progress_window;
+static Layer *s_progress_bg_layer;
+static ProgressLayer *s_progress_layer;
+static TextLayer *s_progress_label;
+static AppTimer *s_progress_timer;
+static int16_t s_progress_value;
+static AppTimer *s_timeout_timer;
+
+static Window *s_toast_window;
+static TextLayer *s_toast_line1;
+static TextLayer *s_toast_line2;
+static AppTimer *s_toast_timer;
+
+static bool s_waiting_phone_status;
+/** Pops before progress: 2 = confirm+picker (watchface); 3 = +menu under picker (Trio Remote app). */
+static int s_confirm_send_pops = 2;
+
+static void cancel_timeout_timer(void);
+static void cancel_progress_timer(void);
+static void cancel_toast_timer(void);
+static void dismiss_toast(void *data);
+static void dismiss_progress_show_toast(const char *line1, const char *line2, bool success_vibe);
+static void dismiss_progress_quiet(void);
+static void push_toast(const char *line1, const char *line2, bool success_vibe);
+
+/** Round watches: keep content inside the visible disc (Pebble Time Round, etc.). */
+static GRect remote_send_safe_bounds(const GRect *wnd_bounds) {
+#ifdef PBL_ROUND
+    return grect_inset(*wnd_bounds, (GEdgeInsets){
+        .top = 28, .right = 40, .bottom = 28, .left = 40});
+#else
+    return *wnd_bounds;
+#endif
+}
+
+/**
+ * Rectangular: letterbox to a 144×168 “classic” layout block (diorite/basalt/aplite) or center on emery.
+ * Round: same as safe_bounds only.
+ */
+static GRect remote_send_layout_block(const GRect *wnd_bounds) {
+#ifdef PBL_ROUND
+    return remote_send_safe_bounds(wnd_bounds);
+#else
+    GRect safe = *wnd_bounds;
+    const int16_t design_h = 168;
+    const int16_t design_w = 144;
+    if (safe.size.h > design_h) {
+        int16_t pad = (int16_t)((safe.size.h - design_h) / 2);
+        safe.origin.y = (int16_t)(safe.origin.y + pad);
+        safe.size.h = design_h;
+    }
+    if (safe.size.w > design_w) {
+        int16_t xpad = (int16_t)((safe.size.w - design_w) / 2);
+        safe.origin.x = (int16_t)(safe.origin.x + xpad);
+        safe.size.w = design_w;
+    }
+    return safe;
+#endif
+}
+
+static void progress_timer_cb(void *data) {
+    (void)data;
+    if (!s_waiting_phone_status || !s_progress_layer) {
+        return;
+    }
+    if (s_progress_value < PROGRESS_IDLE_CAP) {
+        s_progress_value = (int16_t)(s_progress_value + 5);
+        if (s_progress_value > PROGRESS_IDLE_CAP) {
+            s_progress_value = PROGRESS_IDLE_CAP;
+        }
+        progress_layer_set_progress(s_progress_layer, s_progress_value);
+    }
+    s_progress_timer = app_timer_register(PROGRESS_TICK_MS, progress_timer_cb, NULL);
+}
+
+static void timeout_timer_cb(void *data) {
+    (void)data;
+    s_timeout_timer = NULL;
+    if (!s_waiting_phone_status) {
+        return;
+    }
+    s_waiting_phone_status = false;
+    cancel_progress_timer();
+    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
+        window_stack_remove_window(s_progress_window);
+    }
+    push_toast("No response", "Check Trio + Rebble", false);
+}
+
+static void progress_window_load(Window *window) {
+    Layer *root = window_get_root_layer(window);
+    GRect b = layer_get_bounds(root);
+    GRect blk = remote_send_layout_block(&b);
+
+    s_progress_bg_layer = layer_create(b);
+    layer_add_child(root, s_progress_bg_layer);
+#ifdef PBL_COLOR
+    window_set_background_color(window, GColorDarkGray);
+#else
+    window_set_background_color(window, GColorBlack);
+#endif
+
+    int bar_w = blk.size.w - 40;
+    if (bar_w < 60) {
+        bar_w = 60;
+    }
+    int16_t bar_x = (int16_t)(blk.origin.x + (blk.size.w - bar_w) / 2);
+    int16_t bar_y = (int16_t)(blk.origin.y + (blk.size.h * 88 / 168));
+    if (bar_y > blk.origin.y + blk.size.h - 24) {
+        bar_y = (int16_t)(blk.origin.y + blk.size.h / 2);
+    }
+    s_progress_layer = progress_layer_create(GRect(bar_x, bar_y, bar_w, 8));
+    progress_layer_set_progress(s_progress_layer, 0);
+    progress_layer_set_corner_radius(s_progress_layer, 3);
+#ifdef PBL_COLOR
+    progress_layer_set_foreground_color(s_progress_layer, GColorJaegerGreen);
+    progress_layer_set_background_color(s_progress_layer, GColorBlack);
+#else
+    progress_layer_set_foreground_color(s_progress_layer, GColorWhite);
+    progress_layer_set_background_color(s_progress_layer, GColorBlack);
+#endif
+    layer_add_child(root, progress_layer_get_layer(s_progress_layer));
+
+    int16_t lab_y = (int16_t)(blk.origin.y + (blk.size.h * 24 / 168));
+    s_progress_label = text_layer_create(GRect(blk.origin.x + 8, lab_y, blk.size.w - 16, 56));
+    text_layer_set_background_color(s_progress_label, GColorClear);
+    text_layer_set_text_color(s_progress_label, GColorWhite);
+    text_layer_set_text_alignment(s_progress_label, GTextAlignmentCenter);
+    text_layer_set_font(s_progress_label, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+    text_layer_set_text(s_progress_label, "Sending…");
+    layer_add_child(root, text_layer_get_layer(s_progress_label));
+
+    s_progress_value = 0;
+    progress_layer_set_progress(s_progress_layer, 0);
+}
+
+static void progress_window_unload(Window *window) {
+    (void)window;
+    cancel_progress_timer();
+    cancel_timeout_timer();
+    text_layer_destroy(s_progress_label);
+    s_progress_label = NULL;
+    progress_layer_destroy(s_progress_layer);
+    s_progress_layer = NULL;
+    layer_destroy(s_progress_bg_layer);
+    s_progress_bg_layer = NULL;
+}
+
+static void begin_progress_and_send(void) {
+    if (!s_progress_window) {
+        s_progress_window = window_create();
+        window_set_window_handlers(s_progress_window, (WindowHandlers){
+            .load = progress_window_load,
+            .unload = progress_window_unload,
+        });
+    }
+    window_stack_push(s_progress_window, true);
+    s_waiting_phone_status = true;
+    s_progress_value = 0;
+    cancel_progress_timer();
+    s_progress_timer = app_timer_register(PROGRESS_TICK_MS, progress_timer_cb, NULL);
+    cancel_timeout_timer();
+    s_timeout_timer = app_timer_register(PROGRESS_TIMEOUT_MS, timeout_timer_cb, NULL);
+    remote_menu_send_to_phone(s_pending_cmd_type, s_pending_amount);
+}
+
+static void confirm_click_up(ClickRecognizerRef recognizer, void *context) {
+    (void)recognizer;
+    (void)context;
+    for (int i = 0; i < s_confirm_send_pops; i++) {
+        window_stack_pop(true);
+    }
+    begin_progress_and_send();
+}
+
+static void confirm_click_down(ClickRecognizerRef recognizer, void *context) {
+    (void)recognizer;
+    (void)context;
+    window_stack_pop(true);
+}
+
+static void confirm_action_bar_click_config(void *context) {
+    (void)context;
+    window_single_click_subscribe(BUTTON_ID_UP, confirm_click_up, NULL);
+    window_single_click_subscribe(BUTTON_ID_DOWN, confirm_click_down, NULL);
+}
+
+static void confirm_window_load(Window *window) {
+    Layer *root = window_get_root_layer(window);
+    GRect bounds = layer_get_bounds(root);
+    GRect blk = remote_send_layout_block(&bounds);
+
+#ifdef PBL_COLOR
+    window_set_background_color(window, GColorJaegerGreen);
+#else
+    window_set_background_color(window, GColorBlack);
+#endif
+
+    if (s_pending_cmd_type == 1) {
+        snprintf(s_confirm_title_buf, sizeof(s_confirm_title_buf), "Send bolus?");
+        int v = (int)s_pending_amount;
+        snprintf(s_confirm_amount_buf, sizeof(s_confirm_amount_buf), "%d.%d U", v / 10, v % 10);
+    } else {
+        snprintf(s_confirm_title_buf, sizeof(s_confirm_title_buf), "Send carbs?");
+        snprintf(s_confirm_amount_buf, sizeof(s_confirm_amount_buf), "%ld g", (long)s_pending_amount);
+    }
+
+    s_confirm_icon_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_CONFIRM);
+#ifdef PBL_ROUND
+    const GEdgeInsets icon_insets = {.top = 6, .right = 32, .bottom = 56, .left = 20};
+    const GEdgeInsets title_insets = {.top = 68, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets amt_insets = {.top = 94, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const char *title_font = FONT_KEY_GOTHIC_18_BOLD;
+    const char *amount_font = FONT_KEY_GOTHIC_24_BOLD;
+#else
+    const GEdgeInsets icon_insets = {.top = 4, .right = 28, .bottom = 52, .left = 14};
+    const GEdgeInsets title_insets = {.top = 86, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const GEdgeInsets amt_insets = {.top = 116, .right = ACTION_BAR_WIDTH, .left = ACTION_BAR_WIDTH / 2, .bottom = 0};
+    const char *title_font = FONT_KEY_GOTHIC_24_BOLD;
+    const char *amount_font = FONT_KEY_GOTHIC_24_BOLD;
+#endif
+    s_confirm_icon_layer = bitmap_layer_create(grect_inset(blk, icon_insets));
+    bitmap_layer_set_bitmap(s_confirm_icon_layer, s_confirm_icon_bitmap);
+    bitmap_layer_set_compositing_mode(s_confirm_icon_layer, GCompOpSet);
+    layer_add_child(root, bitmap_layer_get_layer(s_confirm_icon_layer));
+
+    s_confirm_title_layer = text_layer_create(grect_inset(blk, title_insets));
+    text_layer_set_text(s_confirm_title_layer, s_confirm_title_buf);
+    text_layer_set_background_color(s_confirm_title_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_title_layer, GColorWhite);
+    text_layer_set_text_alignment(s_confirm_title_layer, GTextAlignmentCenter);
+    text_layer_set_font(s_confirm_title_layer, fonts_get_system_font(title_font));
+    layer_add_child(root, text_layer_get_layer(s_confirm_title_layer));
+
+    s_confirm_amount_layer = text_layer_create(grect_inset(blk, amt_insets));
+    text_layer_set_text(s_confirm_amount_layer, s_confirm_amount_buf);
+    text_layer_set_background_color(s_confirm_amount_layer, GColorClear);
+    text_layer_set_text_color(s_confirm_amount_layer, GColorWhite);
+    text_layer_set_text_alignment(s_confirm_amount_layer, GTextAlignmentCenter);
+    text_layer_set_font(s_confirm_amount_layer, fonts_get_system_font(amount_font));
+    layer_add_child(root, text_layer_get_layer(s_confirm_amount_layer));
+
+    s_confirm_tick_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_TICK);
+    s_confirm_cross_bitmap = gbitmap_create_with_resource(RESOURCE_ID_REMOTE_DIALOG_CROSS);
+    s_confirm_action_bar = action_bar_layer_create();
+    action_bar_layer_set_icon(s_confirm_action_bar, BUTTON_ID_UP, s_confirm_tick_bitmap);
+    action_bar_layer_set_icon(s_confirm_action_bar, BUTTON_ID_DOWN, s_confirm_cross_bitmap);
+    action_bar_layer_set_click_config_provider(s_confirm_action_bar, confirm_action_bar_click_config);
+    action_bar_layer_add_to_window(s_confirm_action_bar, window);
+}
+
+static void confirm_window_unload(Window *window) {
+    (void)window;
+    if (s_confirm_action_bar) {
+        action_bar_layer_destroy(s_confirm_action_bar);
+        s_confirm_action_bar = NULL;
+    }
+    if (s_confirm_title_layer) {
+        text_layer_destroy(s_confirm_title_layer);
+        s_confirm_title_layer = NULL;
+    }
+    if (s_confirm_amount_layer) {
+        text_layer_destroy(s_confirm_amount_layer);
+        s_confirm_amount_layer = NULL;
+    }
+    if (s_confirm_icon_layer) {
+        bitmap_layer_destroy(s_confirm_icon_layer);
+        s_confirm_icon_layer = NULL;
+    }
+    if (s_confirm_icon_bitmap) {
+        gbitmap_destroy(s_confirm_icon_bitmap);
+        s_confirm_icon_bitmap = NULL;
+    }
+    if (s_confirm_tick_bitmap) {
+        gbitmap_destroy(s_confirm_tick_bitmap);
+        s_confirm_tick_bitmap = NULL;
+    }
+    if (s_confirm_cross_bitmap) {
+        gbitmap_destroy(s_confirm_cross_bitmap);
+        s_confirm_cross_bitmap = NULL;
+    }
+}
+
+static void toast_timer_cb(void *data) {
+    (void)data;
+    s_toast_timer = NULL;
+    if (s_toast_window && window_stack_contains_window(s_toast_window)) {
+        window_stack_remove_window(s_toast_window);
+    }
+}
+
+static void dismiss_toast(void *data) {
+    (void)data;
+    cancel_toast_timer();
+    if (s_toast_window && window_stack_contains_window(s_toast_window)) {
+        window_stack_remove_window(s_toast_window);
+    }
+}
+
+static void toast_window_load(Window *window) {
+    Layer *root = window_get_root_layer(window);
+    GRect b = layer_get_bounds(root);
+    GRect safe = remote_send_safe_bounds(&b);
+#ifdef PBL_COLOR
+    window_set_background_color(window, GColorJaegerGreen);
+#else
+    window_set_background_color(window, GColorBlack);
+#endif
+
+    int16_t mid_y = (int16_t)(safe.origin.y + (safe.size.h - 72) / 2);
+    if (mid_y < safe.origin.y) {
+        mid_y = safe.origin.y;
+    }
+    s_toast_line1 = text_layer_create(GRect(safe.origin.x + 6, mid_y, safe.size.w - 12, 32));
+    text_layer_set_background_color(s_toast_line1, GColorClear);
+    text_layer_set_text_color(s_toast_line1, GColorWhite);
+    text_layer_set_text_alignment(s_toast_line1, GTextAlignmentCenter);
+    text_layer_set_font(s_toast_line1, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+    layer_add_child(root, text_layer_get_layer(s_toast_line1));
+
+    s_toast_line2 = text_layer_create(GRect(safe.origin.x + 6, (int16_t)(mid_y + 34), safe.size.w - 12, 40));
+    text_layer_set_background_color(s_toast_line2, GColorClear);
+    text_layer_set_text_color(s_toast_line2, GColorWhite);
+    text_layer_set_text_alignment(s_toast_line2, GTextAlignmentCenter);
+    text_layer_set_font(s_toast_line2, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    layer_add_child(root, text_layer_get_layer(s_toast_line2));
+}
+
+static void toast_window_unload(Window *window) {
+    (void)window;
+    text_layer_destroy(s_toast_line1);
+    text_layer_destroy(s_toast_line2);
+    s_toast_line1 = s_toast_line2 = NULL;
+}
+
+static void cancel_timeout_timer(void) {
+    if (s_timeout_timer) {
+        app_timer_cancel(s_timeout_timer);
+        s_timeout_timer = NULL;
+    }
+}
+
+static void cancel_progress_timer(void) {
+    if (s_progress_timer) {
+        app_timer_cancel(s_progress_timer);
+        s_progress_timer = NULL;
+    }
+}
+
+static void cancel_toast_timer(void) {
+    if (s_toast_timer) {
+        app_timer_cancel(s_toast_timer);
+        s_toast_timer = NULL;
+    }
+}
+
+static void push_toast(const char *line1, const char *line2, bool success_vibe) {
+    cancel_toast_timer();
+    dismiss_toast(NULL);
+
+    if (!s_toast_window) {
+        s_toast_window = window_create();
+        window_set_window_handlers(s_toast_window, (WindowHandlers){
+            .load = toast_window_load,
+            .unload = toast_window_unload,
+        });
+    }
+    window_stack_push(s_toast_window, true);
+    text_layer_set_text(s_toast_line1, line1);
+    text_layer_set_text(s_toast_line2, line2);
+    if (success_vibe) {
+        vibes_double_pulse();
+    } else {
+        vibes_long_pulse();
+    }
+    s_toast_timer = app_timer_register(TOAST_DISPLAY_MS, toast_timer_cb, NULL);
+}
+
+static void dismiss_progress_show_toast(const char *line1, const char *line2, bool success_vibe) {
+    s_waiting_phone_status = false;
+    cancel_progress_timer();
+    cancel_timeout_timer();
+    if (s_progress_layer) {
+        s_progress_value = 100;
+        progress_layer_set_progress(s_progress_layer, 100);
+    }
+    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
+        window_stack_remove_window(s_progress_window);
+    }
+    push_toast(line1, line2, success_vibe);
+}
+
+static void dismiss_progress_quiet(void) {
+    s_waiting_phone_status = false;
+    cancel_progress_timer();
+    cancel_timeout_timer();
+    if (s_progress_layer) {
+        s_progress_value = 100;
+        progress_layer_set_progress(s_progress_layer, 100);
+    }
+    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
+        window_stack_remove_window(s_progress_window);
+    }
+    vibes_short_pulse();
+}
+
+void remote_send_ui_push_confirm(int32_t cmd_type, int32_t amount) {
+    s_pending_cmd_type = cmd_type;
+    s_pending_amount = amount;
+
+    if (!s_confirm_window) {
+        s_confirm_window = window_create();
+        window_set_window_handlers(s_confirm_window, (WindowHandlers){
+            .load = confirm_window_load,
+            .unload = confirm_window_unload,
+        });
+    }
+    window_stack_push(s_confirm_window, true);
+}
+
+bool remote_send_ui_blocks_remote(void) {
+    if (s_confirm_window && window_stack_contains_window(s_confirm_window)) {
+        return true;
+    }
+    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
+        return true;
+    }
+    if (s_toast_window && window_stack_contains_window(s_toast_window)) {
+        return true;
+    }
+    return false;
+}
+
+void remote_send_ui_on_cmd_status(const char *status, bool suppress_toast_if_ok) {
+    if (!s_waiting_phone_status) {
+        return;
+    }
+    bool ok = status && (
+        strstr(status, "saved") != NULL ||
+        strstr(status, "Sent") != NULL ||
+        strstr(status, "deliver") != NULL ||
+        strstr(status, "Bolus sent") != NULL ||
+        strstr(status, "Carbs saved") != NULL);
+    bool bad = status && (
+        strstr(status, "unreachable") != NULL ||
+        strstr(status, "fail") != NULL ||
+        strstr(status, "error") != NULL ||
+        strstr(status, "Error") != NULL);
+
+    if (bad && !ok) {
+        dismiss_progress_show_toast("Trio", status ? status : "Error", false);
+    } else if (suppress_toast_if_ok) {
+        dismiss_progress_quiet();
+    } else {
+        dismiss_progress_show_toast("Done", status ? status : "OK", true);
+    }
+}
+
+void remote_send_ui_on_outbox_failed(void) {
+    if (!s_waiting_phone_status) {
+        return;
+    }
+    dismiss_progress_show_toast("Watch send", "Open Rebble + Trio", false);
+}
+
+void remote_send_ui_on_prepare_send_failed(void) {
+    if (!s_waiting_phone_status) {
+        return;
+    }
+    dismiss_progress_show_toast("Watch send", "Can't queue", false);
+}
+
+void remote_send_ui_set_confirm_send_pop_count(int pop_count) {
+    if (pop_count >= 1 && pop_count <= 5) {
+        s_confirm_send_pops = pop_count;
+    }
+}

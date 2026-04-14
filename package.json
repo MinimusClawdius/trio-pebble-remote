@@ -1,6 +1,6 @@
 {
   "name": "Trio Remote",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Trio bolus/carbs remote — companion watch app (use with Trio watchface)",
   "author": "MinimusClawdius",
   "license": "MIT",
@@ -21,7 +21,10 @@
           "type": "png",
           "name": "IMAGE_MENU_ICON",
           "file": "images/menu_icon.png"
-        }
+        },
+        { "type": "png", "name": "REMOTE_DIALOG_TICK", "file": "images/remote_dialog_tick.png", "targetPlatforms": ["aplite", "basalt", "chalk", "diorite", "emery"] },
+        { "type": "png", "name": "REMOTE_DIALOG_CROSS", "file": "images/remote_dialog_cross.png", "targetPlatforms": ["aplite", "basalt", "chalk", "diorite", "emery"] },
+        { "type": "png", "name": "REMOTE_DIALOG_CONFIRM", "file": "images/remote_dialog_confirm.png", "targetPlatforms": ["aplite", "basalt", "chalk", "diorite", "emery"] }
       ]
     },
     "messageKeys": {

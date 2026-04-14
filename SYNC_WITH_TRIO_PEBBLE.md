@@ -10,8 +10,9 @@ When editing the **Trio** watchface repo, mirror these into **this** repo if the
 2. **`src/pkjs/index.js`**
    - `K` key map, `sendCommand`, `httpPost`, `settings` / `loadSettings` / config URL if Trio HTTP or config page changes.
 
-3. **`src/remote_menu.c`** / **`src/main.c`**
-   - Copy from `trio-pebble/remote-app/src/` when bolus/carbs UI or AppMessage sizes change.
+3. **`src/remote_menu.c`**, **`src/main.c`**, **`src/modules/remote_send_ui.*`**
+   - **Source of truth for Trio Remote UX is this repo** (confirm / progress / toast live here only; the watchface repo does not ship `remote_send_ui`).
+   - If you maintain `trio-pebble/remote-app/`, copy these paths from **here** into `remote-app/src/` when syncing the monorepo.
 
 4. **Menu icon**
    - `resources/images/menu_icon.png` — same 25×25 asset as `trio-pebble`.
