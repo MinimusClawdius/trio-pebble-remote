@@ -4,10 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
-/* tick/cross icons from pebble-examples/ui-patterns. Bolus/carb art is drawn (animated) on a light panel.
+/* tick/cross icons from pebble-examples/ui-patterns. Bolus/carb confirm art is original procedural
+ * animation (resolution-independent). See docs/ANIMATION_ATTRIBUTION.md for OSS references consulted.
  * Layout uses safe insets on round (chalk) and letterboxes on tall/wide rectangular (emery). */
 
 /* Progress animation (see Pebble progress_layer example). */
+#define CONFIRM_ANIM_TICK_MS 105
 #define PROGRESS_TICK_MS 55
 #define PROGRESS_IDLE_CAP 92
 #define PROGRESS_TIMEOUT_MS 14000
@@ -28,6 +30,15 @@ static char s_confirm_title_buf[24];
 static char s_confirm_amount_buf[24];
 static AppTimer *s_confirm_anim_timer;
 static uint8_t s_confirm_anim_frame;
+
+/** Map logical size (80 = “classic art height”) to current panel min(w,h); works on round/emery. */
+static int16_t confirm_art_dim(int sm_min, int numer_80) {
+    int sm = sm_min;
+    if (sm < 40) {
+        sm = 40;
+    }
+    return (int16_t)((numer_80 * sm) / 80);
+}
 
 static Window *s_progress_window;
 static Layer *s_progress_bg_layer;
@@ -249,7 +260,7 @@ static void confirm_anim_timer_cb(void *data) {
     if (s_confirm_art_layer) {
         layer_mark_dirty(s_confirm_art_layer);
     }
-    s_confirm_anim_timer = app_timer_register(130, confirm_anim_timer_cb, NULL);
+    s_confirm_anim_timer = app_timer_register(CONFIRM_ANIM_TICK_MS, confirm_anim_timer_cb, NULL);
 }
 
 static void confirm_art_update_proc(Layer *layer, GContext *ctx) {
@@ -257,45 +268,132 @@ static void confirm_art_update_proc(Layer *layer, GContext *ctx) {
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, r, 0, GCornerNone);
 
-    int w = r.size.w;
-    int h = r.size.h;
+    int w = (int)r.size.w;
+    int h = (int)r.size.h;
+    int sm = w < h ? w : h;
     int cx = w / 2;
     int cy = h / 2;
 
     graphics_context_set_fill_color(ctx, GColorBlack);
 
     if (s_pending_cmd_type == 1) {
-        /* Syringe (horizontal) + droplet */
-        graphics_fill_rect(ctx, GRect(cx - 38, cy - 7, 46, 14), 3, GCornersAll);
-        graphics_fill_rect(ctx, GRect(cx - 46, cy - 5, 10, 10), 2, GCornersAll);
-        graphics_fill_rect(ctx, GRect(cx - 56, cy - 2, 12, 4), 0, GCornerNone);
-        graphics_fill_rect(ctx, GRect(cx + 8, cy - 2, 22, 4), 0, GCornerNone);
-        int ph = (int)(s_confirm_anim_frame % 14);
-        int drop_y = cy + 10 + ph * 2;
-        if (drop_y > h - 8) {
-            drop_y = cy + 10;
+        /* Bolus: syringe + plunger stroke + droplet (all scaled from min side length). */
+        int16_t bh = confirm_art_dim(sm, 14);
+        int16_t bw = confirm_art_dim(sm, 40);
+        int16_t nd = confirm_art_dim(sm, 4);
+        int16_t nl = confirm_art_dim(sm, 18);
+        int16_t fl = confirm_art_dim(sm, 9);
+        int16_t rad = confirm_art_dim(sm, 3);
+        int16_t pr = confirm_art_dim(sm, 3);
+        int16_t plen = confirm_art_dim(sm, 14);
+        int phase = (int)(s_confirm_anim_frame % 28);
+        int16_t plunge = 0;
+        if (phase < 8) {
+            plunge = (int16_t)((phase * confirm_art_dim(sm, 5)) / 7);
+        } else if (phase < 13) {
+            plunge = confirm_art_dim(sm, 5);
+        } else {
+            plunge = (int16_t)(((27 - phase) * confirm_art_dim(sm, 5)) / 14);
         }
-        graphics_fill_rect(ctx, GRect(cx + 24, drop_y, 7, 8), 3, GCornersAll);
+
+        int16_t bx = (int16_t)(cx - bw / 2);
+        int16_t by = (int16_t)(cy - bh / 2);
+        graphics_fill_rect(ctx, GRect(bx, by, bw, bh), rad, GCornersAll);
+        graphics_fill_rect(ctx, GRect((int16_t)(bx - fl), (int16_t)(cy - bh / 2 - nd / 2), fl, (int16_t)(bh + nd)), rad, GCornersLeft);
+        graphics_fill_rect(ctx, GRect((int16_t)(bx - plen - plunge), (int16_t)(cy - pr / 2), plen, pr), 0, GCornerNone);
+
+        int16_t nx = (int16_t)(bx + bw);
+        graphics_fill_rect(ctx, GRect(nx, (int16_t)(cy - nd / 2), nl, nd), 0, GCornerNone);
+
+        int dropx = (int)(nx + nl + confirm_art_dim(sm, 2));
+        int tdrop = phase % 11;
+        int16_t dr = confirm_art_dim(sm, 4);
+        if (dr < 2) {
+            dr = 2;
+        }
+        int drop_y = (int)(cy + confirm_art_dim(sm, 6) + (tdrop * confirm_art_dim(sm, 12)) / 10);
+        if (drop_y > h - dr - 2) {
+            drop_y = (int)(cy + confirm_art_dim(sm, 6));
+        }
+        graphics_fill_circle(ctx, GPoint((int16_t)dropx, (int16_t)drop_y), dr);
+        if (phase > 5 && phase < 11) {
+            int16_t dr2 = (int16_t)((dr * 3) / 4);
+            graphics_fill_circle(ctx, GPoint((int16_t)(dropx + confirm_art_dim(sm, 5)),
+                                               (int16_t)(drop_y - confirm_art_dim(sm, 5))), dr2);
+        }
     } else {
-        /* Plate + food moving toward mouth */
+        /* Carbs: plate, smile arc, main bite + trailing crumb (scaled). */
+        int16_t pr = confirm_art_dim(sm, 24);
+        {
+            int16_t lim = (int16_t)(w / 2 - confirm_art_dim(sm, 4));
+            if (pr > lim) {
+                pr = lim;
+            }
+            lim = (int16_t)(h / 2 - confirm_art_dim(sm, 6));
+            if (pr > lim) {
+                pr = lim;
+            }
+            if (pr < 8) {
+                pr = 8;
+            }
+        }
+        int py = cy + confirm_art_dim(sm, 3);
 #ifdef PBL_COLOR
         graphics_context_set_fill_color(ctx, GColorBlack);
-        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 26);
+        graphics_fill_circle(ctx, GPoint((int16_t)cx, (int16_t)py), pr);
         graphics_context_set_fill_color(ctx, GColorLightGray);
-        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 22);
+        graphics_fill_circle(ctx, GPoint((int16_t)cx, (int16_t)py), (int16_t)((pr * 11) / 12));
 #else
         graphics_context_set_fill_color(ctx, GColorBlack);
-        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 26);
+        graphics_fill_circle(ctx, GPoint((int16_t)cx, (int16_t)py), pr);
         graphics_context_set_fill_color(ctx, GColorWhite);
-        graphics_fill_circle(ctx, GPoint(cx, cy + 4), 22);
+        graphics_fill_circle(ctx, GPoint((int16_t)cx, (int16_t)py), (int16_t)((pr * 11) / 12));
 #endif
         graphics_context_set_stroke_color(ctx, GColorBlack);
-        graphics_draw_line(ctx, GPoint((int16_t)(cx - 16), (int16_t)(cy - 18)), GPoint((int16_t)(cx + 16), (int16_t)(cy - 14)));
         {
-            int t = (int)(s_confirm_anim_frame % 16);
-            int fx = cx - 8 + (t * 20) / 15;
-            int fy = cy + 18 - (t * 16) / 15;
-            graphics_fill_rect(ctx, GRect(fx, fy, 9, 8), 2, GCornersAll);
+            int16_t mw = confirm_art_dim(sm, 17);
+            int16_t mx0 = (int16_t)(cx - mw);
+            int16_t mx1 = (int16_t)(cx + mw);
+            int16_t my0 = (int16_t)(py - pr - confirm_art_dim(sm, 3));
+            int i;
+            for (i = 0; i <= 10; i++) {
+                int16_t px = (int16_t)(mx0 + (mx1 - mx0) * i / 10);
+                int dq = (int16_t)(i - 5);
+                int16_t arc = (int16_t)((dq * dq * confirm_art_dim(sm, 2)) / 12);
+                graphics_draw_pixel(ctx, GPoint(px, (int16_t)(my0 + arc)));
+            }
+        }
+        {
+            int t = (int)(s_confirm_anim_frame % 20);
+            int reach = (t < 15) ? t : 14;
+            int16_t fx0 = (int16_t)(cx + confirm_art_dim(sm, 8));
+            int16_t fy0 = (int16_t)(py + confirm_art_dim(sm, 10));
+            int16_t tx = (int16_t)(cx - confirm_art_dim(sm, 2));
+            int16_t ty = (int16_t)(py - pr - confirm_art_dim(sm, 2));
+            int16_t fs = confirm_art_dim(sm, 8);
+            int16_t fx = (int16_t)(fx0 + (tx - fx0) * reach / 14);
+            int16_t fy = (int16_t)(fy0 + (ty - fy0) * reach / 14);
+            if (fs < 4) {
+                fs = 4;
+            }
+            graphics_context_set_fill_color(ctx, GColorBlack);
+            graphics_fill_rect(ctx, GRect((int16_t)(fx - fs / 2), (int16_t)(fy - fs / 2), fs, fs), (int16_t)(fs / 3), GCornersAll);
+        }
+        {
+            int t2 = (int)((s_confirm_anim_frame + 7) % 20);
+            if (t2 < 14) {
+                int16_t fx0 = (int16_t)(cx + confirm_art_dim(sm, 12));
+                int16_t fy0 = (int16_t)(py + confirm_art_dim(sm, 5));
+                int16_t tx = (int16_t)(cx + confirm_art_dim(sm, 6));
+                int16_t ty = (int16_t)(py - pr + confirm_art_dim(sm, 3));
+                int16_t fs2 = confirm_art_dim(sm, 5);
+                int16_t fx = (int16_t)(fx0 + (tx - fx0) * t2 / 13);
+                int16_t fy = (int16_t)(fy0 + (ty - fy0) * t2 / 13);
+                if (fs2 < 3) {
+                    fs2 = 3;
+                }
+                graphics_fill_rect(ctx, GRect((int16_t)(fx - fs2 / 2), (int16_t)(fy - fs2 / 2), fs2, fs2), (int16_t)(fs2 / 2), GCornersAll);
+            }
         }
     }
 }
@@ -364,7 +462,7 @@ static void confirm_window_load(Window *window) {
 
     s_confirm_anim_frame = 0;
     confirm_cancel_anim_timer();
-    s_confirm_anim_timer = app_timer_register(130, confirm_anim_timer_cb, NULL);
+    s_confirm_anim_timer = app_timer_register(CONFIRM_ANIM_TICK_MS, confirm_anim_timer_cb, NULL);
 
     s_confirm_title_layer = text_layer_create(grect_inset(blk, title_insets));
     text_layer_set_text(s_confirm_title_layer, s_confirm_title_buf);
