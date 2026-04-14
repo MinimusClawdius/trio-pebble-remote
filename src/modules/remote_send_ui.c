@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* tick/cross icons from pebble-examples/ui-patterns. Bolus/carb confirm art is original procedural
- * animation (resolution-independent). See docs/ANIMATION_ATTRIBUTION.md for OSS references consulted.
+/* tick/cross icons from pebble-examples/ui-patterns. Bolus/carb confirm: optional PDCS on color
+ * watches (basalt/chalk/emery), else procedural art — see docs/CONFIRM_PDC.md.
  * Layout uses safe insets on round (chalk) and letterboxes on tall/wide rectangular (emery). */
 
 /* Progress animation (see Pebble progress_layer example). */
@@ -14,6 +14,16 @@
 #define PROGRESS_IDLE_CAP 92
 #define PROGRESS_TIMEOUT_MS 14000
 #define TOAST_DISPLAY_MS 1100
+
+/* Color watches only: load PDCS from resources (see docs/CONFIRM_PDC.md). Set to 0 to force procedural. */
+#ifndef TRIO_REMOTE_CONFIRM_PDC_ASSETS
+#define TRIO_REMOTE_CONFIRM_PDC_ASSETS 1
+#endif
+#if defined(PBL_COLOR) && TRIO_REMOTE_CONFIRM_PDC_ASSETS
+#define TRIO_REMOTE_CONFIRM_PDC_ENABLED 1
+#else
+#define TRIO_REMOTE_CONFIRM_PDC_ENABLED 0
+#endif
 
 static int32_t s_pending_cmd_type;
 static int32_t s_pending_amount;
@@ -30,6 +40,11 @@ static char s_confirm_title_buf[24];
 static char s_confirm_amount_buf[24];
 static AppTimer *s_confirm_anim_timer;
 static uint8_t s_confirm_anim_frame;
+
+#if TRIO_REMOTE_CONFIRM_PDC_ENABLED
+static GDrawCommandSequence *s_confirm_pdc_bolus;
+static GDrawCommandSequence *s_confirm_pdc_carb;
+#endif
 
 /** Map logical size (80 = “classic art height”) to current panel min(w,h); works on round/emery. */
 static int16_t confirm_art_dim(int sm_min, int numer_80) {
@@ -263,8 +278,62 @@ static void confirm_anim_timer_cb(void *data) {
     s_confirm_anim_timer = app_timer_register(CONFIRM_ANIM_TICK_MS, confirm_anim_timer_cb, NULL);
 }
 
+#if TRIO_REMOTE_CONFIRM_PDC_ENABLED
+static void confirm_pdc_unload(void) {
+    if (s_confirm_pdc_bolus) {
+        gdraw_command_sequence_destroy(s_confirm_pdc_bolus);
+        s_confirm_pdc_bolus = NULL;
+    }
+    if (s_confirm_pdc_carb) {
+        gdraw_command_sequence_destroy(s_confirm_pdc_carb);
+        s_confirm_pdc_carb = NULL;
+    }
+}
+
+/**
+ * Draw one frame of the Pebble Draw Command sequence when assets are present.
+ * Returns false if sequences are missing or empty so the caller can fall back to procedural art.
+ */
+static bool confirm_pdc_try_draw(GContext *ctx, const GRect *panel) {
+    if (!s_confirm_pdc_bolus) {
+        s_confirm_pdc_bolus = gdraw_command_sequence_create_with_resource(RESOURCE_ID_CONFIRM_BOLUS_PDCS);
+        s_confirm_pdc_carb = gdraw_command_sequence_create_with_resource(RESOURCE_ID_CONFIRM_CARB_PDCS);
+    }
+    GDrawCommandSequence *seq = (s_pending_cmd_type == 1) ? s_confirm_pdc_bolus : s_confirm_pdc_carb;
+    if (!seq) {
+        return false;
+    }
+    uint32_t n = gdraw_command_sequence_get_num_frames(seq);
+    if (n == 0) {
+        return false;
+    }
+    uint32_t idx = (uint32_t)s_confirm_anim_frame % n;
+    GDrawCommandFrame *fr = gdraw_command_sequence_get_frame_by_index(seq, idx);
+    if (!fr) {
+        return false;
+    }
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, *panel, 0, GCornerNone);
+
+    GSize sz = gdraw_command_sequence_get_bounds_size(seq);
+    int16_t ox = panel->origin.x;
+    int16_t oy = panel->origin.y;
+    if (sz.w > 0 && sz.h > 0) {
+        ox = (int16_t)(panel->origin.x + (panel->size.w - sz.w) / 2);
+        oy = (int16_t)(panel->origin.y + (panel->size.h - sz.h) / 2);
+    }
+    gdraw_command_frame_draw(ctx, seq, fr, GPoint(ox, oy));
+    return true;
+}
+#endif
+
 static void confirm_art_update_proc(Layer *layer, GContext *ctx) {
     GRect r = layer_get_bounds(layer);
+#if TRIO_REMOTE_CONFIRM_PDC_ENABLED
+    if (confirm_pdc_try_draw(ctx, &r)) {
+        return;
+    }
+#endif
     graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, r, 0, GCornerNone);
 
@@ -500,6 +569,9 @@ static void confirm_window_load(Window *window) {
 static void confirm_window_unload(Window *window) {
     (void)window;
     confirm_cancel_anim_timer();
+#if TRIO_REMOTE_CONFIRM_PDC_ENABLED
+    confirm_pdc_unload();
+#endif
     if (s_confirm_action_bar) {
         action_bar_layer_destroy(s_confirm_action_bar);
         s_confirm_action_bar = NULL;

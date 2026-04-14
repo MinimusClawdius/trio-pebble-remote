@@ -4,7 +4,9 @@
 
 - **Tick / cross icons** on the confirm action bar come from **Pebble `ui-patterns`** (MIT-style Pebble examples). Repository: [pebble-examples/ui-patterns](https://github.com/pebble-examples/ui-patterns).
 
-- **Bolus and carb confirm illustrations** in `src/modules/remote_send_ui.c` are **original procedural drawings** (no embedded bitmap frames for those scenes). Geometry is scaled from the art layer’s minimum side length so layouts stay readable on **aplite, basalt, chalk (round), diorite, and emery** without per-platform image packs.
+- **Optional confirm PDCS** (basalt / chalk / emery only): stub sequences under `resources/pdc/` are copied from [pebble-examples/pdc-sequence](https://github.com/pebble-examples/pdc-sequence) (`confirm_sequence.pdc`, `sent_sequence.pdc`) as **temporary placeholders** until custom bolus/carb vector animations replace them. See `docs/CONFIRM_PDC.md`.
+
+- **Procedural fallback** in `src/modules/remote_send_ui.c` is **original code**: used on **aplite** and **diorite**, and on color watches if PDC load fails or is disabled (`TRIO_REMOTE_CONFIRM_PDC_ASSETS`). Geometry scales from the art layer’s minimum side length.
 
 ## References consulted (patterns and docs)
 
@@ -12,9 +14,9 @@ These projects and guides informed timing and structure (AppTimer-driven `layer_
 
 - [pebble-examples/composite-animations-example](https://github.com/pebble-examples/composite-animations-example) — composite / property animation patterns (MIT).
 
-- [Rebble — Vector animations tutorial](https://developer.repebble.com/tutorials/advanced/vector-animations/) — PDC / draw-command animation concepts. Trio Remote does **not** ship PDC sequences for confirm art so **aplite** and **diorite** stay supported with the same code path.
+- [Rebble — Vector animations tutorial](https://developer.repebble.com/tutorials/advanced/vector-animations/) — PDC / draw-command concepts; Trio Remote uses PDCS on **color** targets and procedural art on **aplite** / **diorite**.
 
-- [pebble-examples/pdc-sequence](https://github.com/pebble-examples/pdc-sequence) and [pdc-image](https://github.com/pebble-examples/pdc-image) — cited as future options if you add optional PDC assets for color platforms with monochrome fallbacks.
+- [pebble-examples/pdc-sequence](https://github.com/pebble-examples/pdc-sequence) and [pdc-image](https://github.com/pebble-examples/pdc-image) — sequence playback and static PDC patterns; **stub** `.pdc` files in this repo come from `pdc-sequence` (see above).
 
 ## If you add third-party art later
 
