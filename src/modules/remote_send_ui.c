@@ -29,7 +29,7 @@ static char s_confirm_amount_buf[24];
 
 static Window *s_progress_window;
 static Layer *s_progress_bg_layer;
-static ProgressLayer *s_progress_layer;
+static Layer *s_progress_bar_layer;
 static TextLayer *s_progress_label;
 static AppTimer *s_progress_timer;
 static int16_t s_progress_value;
@@ -51,6 +51,36 @@ static void dismiss_toast(void *data);
 static void dismiss_progress_show_toast(const char *line1, const char *line2, bool success_vibe);
 static void dismiss_progress_quiet(void);
 static void push_toast(const char *line1, const char *line2, bool success_vibe);
+
+/** Older CloudPebble SDKs lack window_stack_remove_window — only pop when this window is on top. */
+static void remote_send_close_window_if_top(Window *w) {
+    if (!w || !window_stack_contains_window(w)) {
+        return;
+    }
+    if (window_stack_get_top_window() == w) {
+        window_stack_pop(true);
+    }
+}
+
+static void progress_bar_update_proc(Layer *layer, GContext *ctx) {
+    (void)layer;
+    GRect b = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, b, 2, GCornersAll);
+    int fw = (int)b.size.w * (int)s_progress_value / 100;
+    if (fw < 1) {
+        return;
+    }
+    if (fw > b.size.w) {
+        fw = b.size.w;
+    }
+#ifdef PBL_COLOR
+    graphics_context_set_fill_color(ctx, GColorJaegerGreen);
+#else
+    graphics_context_set_fill_color(ctx, GColorWhite);
+#endif
+    graphics_fill_rect(ctx, GRect(0, 0, fw, b.size.h), 2, GCornersLeft);
+}
 
 /** Round watches: keep content inside the visible disc (Pebble Time Round, etc.). */
 static GRect remote_send_safe_bounds(const GRect *wnd_bounds) {
@@ -89,7 +119,7 @@ static GRect remote_send_layout_block(const GRect *wnd_bounds) {
 
 static void progress_timer_cb(void *data) {
     (void)data;
-    if (!s_waiting_phone_status || !s_progress_layer) {
+    if (!s_waiting_phone_status || !s_progress_bar_layer) {
         return;
     }
     if (s_progress_value < PROGRESS_IDLE_CAP) {
@@ -97,7 +127,7 @@ static void progress_timer_cb(void *data) {
         if (s_progress_value > PROGRESS_IDLE_CAP) {
             s_progress_value = PROGRESS_IDLE_CAP;
         }
-        progress_layer_set_progress(s_progress_layer, s_progress_value);
+        layer_mark_dirty(s_progress_bar_layer);
     }
     s_progress_timer = app_timer_register(PROGRESS_TICK_MS, progress_timer_cb, NULL);
 }
@@ -110,9 +140,7 @@ static void timeout_timer_cb(void *data) {
     }
     s_waiting_phone_status = false;
     cancel_progress_timer();
-    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
-        window_stack_remove_window(s_progress_window);
-    }
+    remote_send_close_window_if_top(s_progress_window);
     push_toast("No response", "Check Trio + Rebble", false);
 }
 
@@ -138,17 +166,9 @@ static void progress_window_load(Window *window) {
     if (bar_y > blk.origin.y + blk.size.h - 24) {
         bar_y = (int16_t)(blk.origin.y + blk.size.h / 2);
     }
-    s_progress_layer = progress_layer_create(GRect(bar_x, bar_y, bar_w, 8));
-    progress_layer_set_progress(s_progress_layer, 0);
-    progress_layer_set_corner_radius(s_progress_layer, 3);
-#ifdef PBL_COLOR
-    progress_layer_set_foreground_color(s_progress_layer, GColorJaegerGreen);
-    progress_layer_set_background_color(s_progress_layer, GColorBlack);
-#else
-    progress_layer_set_foreground_color(s_progress_layer, GColorWhite);
-    progress_layer_set_background_color(s_progress_layer, GColorBlack);
-#endif
-    layer_add_child(root, progress_layer_get_layer(s_progress_layer));
+    s_progress_bar_layer = layer_create(GRect(bar_x, bar_y, bar_w, 8));
+    layer_set_update_proc(s_progress_bar_layer, progress_bar_update_proc);
+    layer_add_child(root, s_progress_bar_layer);
 
     int16_t lab_y = (int16_t)(blk.origin.y + (blk.size.h * 24 / 168));
     s_progress_label = text_layer_create(GRect(blk.origin.x + 8, lab_y, blk.size.w - 16, 56));
@@ -160,7 +180,7 @@ static void progress_window_load(Window *window) {
     layer_add_child(root, text_layer_get_layer(s_progress_label));
 
     s_progress_value = 0;
-    progress_layer_set_progress(s_progress_layer, 0);
+    layer_mark_dirty(s_progress_bar_layer);
 }
 
 static void progress_window_unload(Window *window) {
@@ -169,8 +189,8 @@ static void progress_window_unload(Window *window) {
     cancel_timeout_timer();
     text_layer_destroy(s_progress_label);
     s_progress_label = NULL;
-    progress_layer_destroy(s_progress_layer);
-    s_progress_layer = NULL;
+    layer_destroy(s_progress_bar_layer);
+    s_progress_bar_layer = NULL;
     layer_destroy(s_progress_bg_layer);
     s_progress_bg_layer = NULL;
 }
@@ -210,8 +230,9 @@ static void confirm_click_down(ClickRecognizerRef recognizer, void *context) {
 
 static void confirm_action_bar_click_config(void *context) {
     (void)context;
-    window_single_click_subscribe(BUTTON_ID_UP, confirm_click_up, NULL);
-    window_single_click_subscribe(BUTTON_ID_DOWN, confirm_click_down, NULL);
+    /* Frozen CloudPebble SDK: window_single_click_subscribe(button, handler) — two args only. */
+    window_single_click_subscribe(BUTTON_ID_UP, confirm_click_up);
+    window_single_click_subscribe(BUTTON_ID_DOWN, confirm_click_down);
 }
 
 static void confirm_window_load(Window *window) {
@@ -313,17 +334,13 @@ static void confirm_window_unload(Window *window) {
 static void toast_timer_cb(void *data) {
     (void)data;
     s_toast_timer = NULL;
-    if (s_toast_window && window_stack_contains_window(s_toast_window)) {
-        window_stack_remove_window(s_toast_window);
-    }
+    remote_send_close_window_if_top(s_toast_window);
 }
 
 static void dismiss_toast(void *data) {
     (void)data;
     cancel_toast_timer();
-    if (s_toast_window && window_stack_contains_window(s_toast_window)) {
-        window_stack_remove_window(s_toast_window);
-    }
+    remote_send_close_window_if_top(s_toast_window);
 }
 
 static void toast_window_load(Window *window) {
@@ -409,13 +426,11 @@ static void dismiss_progress_show_toast(const char *line1, const char *line2, bo
     s_waiting_phone_status = false;
     cancel_progress_timer();
     cancel_timeout_timer();
-    if (s_progress_layer) {
+    if (s_progress_bar_layer) {
         s_progress_value = 100;
-        progress_layer_set_progress(s_progress_layer, 100);
+        layer_mark_dirty(s_progress_bar_layer);
     }
-    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
-        window_stack_remove_window(s_progress_window);
-    }
+    remote_send_close_window_if_top(s_progress_window);
     push_toast(line1, line2, success_vibe);
 }
 
@@ -423,13 +438,11 @@ static void dismiss_progress_quiet(void) {
     s_waiting_phone_status = false;
     cancel_progress_timer();
     cancel_timeout_timer();
-    if (s_progress_layer) {
+    if (s_progress_bar_layer) {
         s_progress_value = 100;
-        progress_layer_set_progress(s_progress_layer, 100);
+        layer_mark_dirty(s_progress_bar_layer);
     }
-    if (s_progress_window && window_stack_contains_window(s_progress_window)) {
-        window_stack_remove_window(s_progress_window);
-    }
+    remote_send_close_window_if_top(s_progress_window);
     vibes_short_pulse();
 }
 
