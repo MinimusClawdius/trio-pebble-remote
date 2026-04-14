@@ -38,9 +38,52 @@ var settings = {
     remoteCarbStepG: 5
 };
 
-/** Minimal settings page (served from this repo on GitHub raw). */
-var REMOTE_SETTINGS_URL =
-    'https://raw.githubusercontent.com/MinimusClawdius/trio-pebble-remote/main/src/pkjs/remote_settings.html';
+/**
+ * Embedded settings HTML — Pebble WebView treats raw.githubusercontent.com as text/plain,
+ * which shows source instead of a form. data: URLs render as HTML reliably.
+ * (See also src/pkjs/remote_settings.html — keep in sync when editing fields.)
+ */
+var REMOTE_SETTINGS_PAGE = [
+    '<!DOCTYPE html><html><head><meta charset="utf-8"/>',
+    '<meta name="viewport" content="width=device-width, initial-scale=1"/>',
+    '<title>Trio Remote</title><style>',
+    'body{font-family:system-ui,sans-serif;margin:16px;max-width:420px}',
+    'label{display:block;margin-top:12px;font-weight:600}',
+    'input{width:100%;box-sizing:border-box;padding:8px;margin-top:4px;font-size:16px}',
+    'p{color:#444;font-size:14px}',
+    'button{margin-top:20px;padding:12px 20px;font-size:16px;width:100%}',
+    '</style></head><body><h2>Trio Remote</h2>',
+    '<p>Defaults when you open the bolus or carb picker, and how much each UP/DOWN press changes.</p>',
+    '<label for="trioHost">Trio HTTP base</label>',
+    '<input id="trioHost" type="text" placeholder="http://127.0.0.1:8080"/>',
+    '<label for="defBolus">Default bolus (tenths of a unit)</label>',
+    '<input id="defBolus" type="number" min="1" max="300" step="1"/>',
+    '<p class="hint">Example: 25 = 2.5 U</p>',
+    '<label for="defCarb">Default carbs (grams)</label>',
+    '<input id="defCarb" type="number" min="1" max="250" step="1"/>',
+    '<label for="stepBolus">Bolus step (tenths per press)</label>',
+    '<input id="stepBolus" type="number" min="1" max="50" step="1"/>',
+    '<p class="hint">Example: 1 = 0.1 U per press</p>',
+    '<label for="stepCarb">Carb step (grams per press)</label>',
+    '<input id="stepCarb" type="number" min="1" max="25" step="1"/>',
+    '<button type="button" id="save">Save &amp; return</button><script>',
+    'function parseHash(){try{var h=(location.hash||"").replace(/^#/,"");',
+    'if(!h)return{};return JSON.parse(decodeURIComponent(h))||{};}catch(e){return{};}}',
+    'var cfg=parseHash();',
+    'document.getElementById("trioHost").value=cfg.trioHost||"http://127.0.0.1:8080";',
+    'document.getElementById("defBolus").value=cfg.remoteDefaultBolusTenths!=null?cfg.remoteDefaultBolusTenths:20;',
+    'document.getElementById("defCarb").value=cfg.remoteDefaultCarbG!=null?cfg.remoteDefaultCarbG:15;',
+    'document.getElementById("stepBolus").value=cfg.remoteBolusStepTenths!=null?cfg.remoteBolusStepTenths:1;',
+    'document.getElementById("stepCarb").value=cfg.remoteCarbStepG!=null?cfg.remoteCarbStepG:5;',
+    'document.getElementById("save").onclick=function(){',
+    'var out={trioHost:document.getElementById("trioHost").value.trim()||"http://127.0.0.1:8080",',
+    'remoteDefaultBolusTenths:parseInt(document.getElementById("defBolus").value,10)||20,',
+    'remoteDefaultCarbG:parseInt(document.getElementById("defCarb").value,10)||15,',
+    'remoteBolusStepTenths:parseInt(document.getElementById("stepBolus").value,10)||1,',
+    'remoteCarbStepG:parseInt(document.getElementById("stepCarb").value,10)||5};',
+    'document.location="pebblejs://close#"+encodeURIComponent(JSON.stringify(out));};',
+    '</script></body></html>'
+].join('');
 
 function loadSettings() {
     try {
@@ -128,7 +171,7 @@ function sendCommand(type, amount) {
 
 Pebble.addEventListener('showConfiguration', function () {
     var params = encodeURIComponent(JSON.stringify(settings));
-    Pebble.openURL(REMOTE_SETTINGS_URL + '#' + params);
+    Pebble.openURL('data:text/html;charset=utf-8,' + encodeURIComponent(REMOTE_SETTINGS_PAGE) + '#' + params);
 });
 
 Pebble.addEventListener('webviewclosed', function (e) {

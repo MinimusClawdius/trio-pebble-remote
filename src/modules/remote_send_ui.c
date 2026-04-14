@@ -119,6 +119,27 @@ static GRect remote_send_layout_block(const GRect *wnd_bounds) {
 #endif
 }
 
+GRect remote_send_content_left_of_action_bar(const GRect *window_bounds) {
+    GRect blk = remote_send_layout_block(window_bounds);
+    int16_t abw = ACTION_BAR_WIDTH;
+    if (blk.size.w <= abw) {
+        return blk;
+    }
+    return (GRect){
+        .origin = blk.origin,
+        .size = {(int16_t)(blk.size.w - abw), blk.size.h},
+    };
+}
+
+GRect remote_send_right_action_strip_rect(const GRect *window_bounds) {
+    GRect blk = remote_send_layout_block(window_bounds);
+    int16_t abw = ACTION_BAR_WIDTH;
+    return (GRect){
+        .origin = {(int16_t)(blk.origin.x + blk.size.w - abw), blk.origin.y},
+        .size = {abw, blk.size.h},
+    };
+}
+
 static void progress_timer_cb(void *data) {
     (void)data;
     if (!s_waiting_phone_status || !s_progress_bar_layer) {

@@ -1,6 +1,12 @@
 #pragma once
 #include <pebble.h>
 
+/** Layout block used by confirm/progress; left area with action strip reserved on the right. */
+GRect remote_send_content_left_of_action_bar(const GRect *window_bounds);
+
+/** Full-height strip at the right of the layout block (for drawn + / ✓ / − affordances). */
+GRect remote_send_right_action_strip_rect(const GRect *window_bounds);
+
 /**
  * Remote bolus/carb UX: confirm (choice dialog — ActionBar tick/cross, assets from
  * pebble-examples/ui-patterns) → progress bar while phone JS runs HTTP → toast on status.

@@ -19,7 +19,7 @@ static SimpleMenuItem s_menu_items[REMOTE_MENU_ITEMS];
 
 static TextLayer *s_pick_title;
 static TextLayer *s_pick_value;
-static TextLayer *s_pick_hint;
+static Layer *s_pick_chrome_layer;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
 
@@ -120,29 +120,66 @@ static void picker_click_config(void *context) {
     window_single_click_subscribe(BUTTON_ID_BACK, picker_back_handler);
 }
 
+static void pick_chrome_update_proc(Layer *layer, GContext *ctx) {
+    GRect r = layer_get_bounds(layer);
+#ifdef PBL_COLOR
+    graphics_context_set_fill_color(ctx, GColorDarkGray);
+#else
+    graphics_context_set_fill_color(ctx, GColorBlack);
+#endif
+    graphics_fill_rect(ctx, r, 0, GCornerNone);
+
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    int cx = (int)r.size.w / 2;
+    int h = (int)r.size.h;
+    int y_plus = h * 17 / 100;
+    int y_check = h * 48 / 100;
+    int y_minus = h * 81 / 100;
+    const int arm = 6;
+    const int thick = 3;
+
+    graphics_fill_rect(ctx, GRect((int16_t)(cx - arm), (int16_t)(y_plus - 1), (int16_t)(arm * 2), thick), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect((int16_t)(cx - 1), (int16_t)(y_plus - arm), thick, (int16_t)(arm * 2)), 0, GCornerNone);
+
+    graphics_fill_rect(ctx, GRect((int16_t)(cx - arm), (int16_t)(y_minus - 1), (int16_t)(arm * 2), thick), 0, GCornerNone);
+
+    graphics_fill_rect(ctx, GRect((int16_t)(cx - 8), (int16_t)(y_check - 1), 6, thick), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect((int16_t)(cx - 3), (int16_t)(y_check - 5), thick, 10), 0, GCornerNone);
+}
+
 static void pick_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
+    GRect content = remote_send_content_left_of_action_bar(&b);
+    GRect strip = remote_send_right_action_strip_rect(&b);
 
-    s_pick_title = text_layer_create(GRect(0, 12, b.size.w, 28));
+    window_set_background_color(window, GColorWhite);
+
+    int16_t title_h = 40;
+    int16_t title_y = (int16_t)(content.origin.y + 4);
+    s_pick_title = text_layer_create(GRect(content.origin.x, title_y, content.size.w, title_h));
     text_layer_set_background_color(s_pick_title, GColorClear);
+    text_layer_set_text_color(s_pick_title, GColorBlack);
     text_layer_set_text_alignment(s_pick_title, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+    text_layer_set_font(s_pick_title, fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK));
     text_layer_set_text(s_pick_title, s_pick_cmd_type == 1 ? "Bolus" : "Carbs");
     layer_add_child(root, text_layer_get_layer(s_pick_title));
 
-    s_pick_value = text_layer_create(GRect(0, 48, b.size.w, 44));
+    int16_t val_y = (int16_t)(title_y + title_h - 2);
+    int16_t val_h = (int16_t)(content.origin.y + content.size.h - val_y - 6);
+    if (val_h < 52) {
+        val_h = 52;
+    }
+    s_pick_value = text_layer_create(GRect(content.origin.x, val_y, content.size.w, val_h));
     text_layer_set_background_color(s_pick_value, GColorClear);
+    text_layer_set_text_color(s_pick_value, GColorBlack);
     text_layer_set_text_alignment(s_pick_value, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_value, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+    text_layer_set_font(s_pick_value, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD));
     layer_add_child(root, text_layer_get_layer(s_pick_value));
 
-    s_pick_hint = text_layer_create(GRect(8, b.size.h - 44, b.size.w - 16, 40));
-    text_layer_set_background_color(s_pick_hint, GColorClear);
-    text_layer_set_text_alignment(s_pick_hint, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_hint, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text(s_pick_hint, "UP/DOWN adjust\nSELECT → confirm\n2× UP sends there");
-    layer_add_child(root, text_layer_get_layer(s_pick_hint));
+    s_pick_chrome_layer = layer_create(strip);
+    layer_set_update_proc(s_pick_chrome_layer, pick_chrome_update_proc);
+    layer_add_child(root, s_pick_chrome_layer);
 
     window_set_click_config_provider(window, picker_click_config);
     picker_refresh_value_text();
@@ -152,8 +189,9 @@ static void pick_window_unload(Window *window) {
     (void)window;
     text_layer_destroy(s_pick_title);
     text_layer_destroy(s_pick_value);
-    text_layer_destroy(s_pick_hint);
-    s_pick_title = s_pick_value = s_pick_hint = NULL;
+    layer_destroy(s_pick_chrome_layer);
+    s_pick_title = s_pick_value = NULL;
+    s_pick_chrome_layer = NULL;
 }
 
 static void push_amount_picker(int32_t cmd_type, int32_t amount) {
@@ -208,13 +246,13 @@ static void menu_window_load(Window *window) {
     GRect bounds = layer_get_bounds(root);
 
     s_menu_items[0] = (SimpleMenuItem){
-        .title = "Remote bolus",
-        .subtitle = "Picker defaults",
+        .title = "Bolus",
+        .subtitle = NULL,
         .callback = menu_select_cb,
     };
     s_menu_items[1] = (SimpleMenuItem){
-        .title = "Remote carbs",
-        .subtitle = "Phone app settings",
+        .title = "Carbs",
+        .subtitle = NULL,
         .callback = menu_select_cb,
     };
     s_menu_items[2] = (SimpleMenuItem){
