@@ -128,22 +128,35 @@ function payloadGet(p, keyNum) {
 
 function httpPost(url, body, callback) {
     var xhr = new XMLHttpRequest();
+    console.log('Trio Remote: HTTP POST ' + url + ' body=' + body);
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.timeout = 15000;
+    xhr.timeout = 12000;
     xhr.onload = function () {
+        console.log('Trio Remote: HTTP ' + xhr.status + ' from ' + url + ' body=' + (xhr.responseText || ''));
         callback(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : null);
     };
-    xhr.onerror = function () { callback(null); };
-    xhr.ontimeout = function () { callback(null); };
+    xhr.onerror = function () {
+        console.log('Trio Remote: HTTP error ' + url);
+        callback(null);
+    };
+    xhr.ontimeout = function () {
+        console.log('Trio Remote: HTTP timeout ' + url + ' timeout=' + xhr.timeout);
+        callback(null);
+    };
     xhr.send(body);
 }
 
 function sendCommand(type, amount) {
+    console.log('Trio Remote: sendCommand type=' + type + ' amount=' + amount + ' ds=' + settings.dataSource);
     if (settings.dataSource !== 0 && settings.dataSource !== 3) {
         var msg = {};
         msg[K.CMD_STATUS] = 'Commands need Trio API';
-        Pebble.sendAppMessage(msg);
+        Pebble.sendAppMessage(msg, function () {
+            console.log('Trio Remote: status sent (needs Trio API)');
+        }, function (e) {
+            console.log('Trio Remote: status send failed (needs Trio API): ' + JSON.stringify(e || {}));
+        });
         return;
     }
 
@@ -165,7 +178,11 @@ function sendCommand(type, amount) {
         }
         var msg = {};
         msg[K.CMD_STATUS] = statusMsg.substring(0, 63);
-        Pebble.sendAppMessage(msg);
+        Pebble.sendAppMessage(msg, function () {
+            console.log('Trio Remote: status sent to watch: ' + msg[K.CMD_STATUS]);
+        }, function (e) {
+            console.log('Trio Remote: status send failed to watch: ' + JSON.stringify(e || {}));
+        });
     });
 }
 
@@ -198,6 +215,8 @@ Pebble.addEventListener('appmessage', function (e) {
     if (cmdType !== undefined && cmdAmt !== undefined) {
         console.log('Trio Remote: cmd type=' + cmdType + ' amt=' + cmdAmt);
         sendCommand(cmdType | 0, cmdAmt | 0);
+    } else {
+        console.log('Trio Remote: appmessage without cmd payload=' + JSON.stringify(p || {}));
     }
 });
 

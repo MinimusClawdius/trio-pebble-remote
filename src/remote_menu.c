@@ -46,13 +46,23 @@ void remote_menu_apply_phone_defaults(int32_t default_bolus_tenths, int32_t defa
 
 void remote_menu_send_to_phone(int32_t cmd_type, int32_t amount) {
     DictionaryIterator *iter;
-    if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    AppMessageResult begin_res = app_message_outbox_begin(&iter);
+    if (begin_res != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "remote: outbox_begin failed=%d type=%ld amount=%ld",
+                (int)begin_res, (long)cmd_type, (long)amount);
         remote_send_ui_on_prepare_send_failed();
         return;
     }
     dict_write_int32(iter, KEY_CMD_TYPE, cmd_type);
     dict_write_int32(iter, KEY_CMD_AMOUNT, amount);
-    app_message_outbox_send();
+    APP_LOG(APP_LOG_LEVEL_INFO, "remote: queue cmd type=%ld amount=%ld",
+            (long)cmd_type, (long)amount);
+    AppMessageResult send_res = app_message_outbox_send();
+    if (send_res != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "remote: outbox_send failed=%d type=%ld amount=%ld",
+                (int)send_res, (long)cmd_type, (long)amount);
+        remote_send_ui_on_prepare_send_failed();
+    }
 }
 
 static void picker_refresh_value_text(void) {

@@ -12,7 +12,7 @@
 #define CONFIRM_ANIM_TICK_MS 105
 #define PROGRESS_TICK_MS 55
 #define PROGRESS_IDLE_CAP 92
-#define PROGRESS_TIMEOUT_MS 14000
+#define PROGRESS_TIMEOUT_MS 20000
 #define TOAST_DISPLAY_MS 1100
 
 /* Color watches only: load PDCS from resources (see docs/CONFIRM_PDC.md). Set to 0 to force procedural. */
@@ -190,6 +190,8 @@ static void timeout_timer_cb(void *data) {
     s_waiting_phone_status = false;
     cancel_progress_timer();
     remote_send_close_window_if_top(s_progress_window);
+    APP_LOG(APP_LOG_LEVEL_ERROR, "remote: status timeout cmd_type=%ld amount=%ld",
+            (long)s_pending_cmd_type, (long)s_pending_amount);
     push_toast("No response", "Check Trio + Rebble", false);
 }
 
@@ -259,6 +261,8 @@ static void begin_progress_and_send(void) {
     s_progress_timer = app_timer_register(PROGRESS_TICK_MS, progress_timer_cb, NULL);
     cancel_timeout_timer();
     s_timeout_timer = app_timer_register(PROGRESS_TIMEOUT_MS, timeout_timer_cb, NULL);
+    APP_LOG(APP_LOG_LEVEL_INFO, "remote: begin send cmd_type=%ld amount=%ld timeout_ms=%d",
+            (long)s_pending_cmd_type, (long)s_pending_amount, PROGRESS_TIMEOUT_MS);
     remote_menu_send_to_phone(s_pending_cmd_type, s_pending_amount);
 }
 
@@ -742,8 +746,11 @@ bool remote_send_ui_blocks_remote(void) {
 
 void remote_send_ui_on_cmd_status(const char *status, bool suppress_toast_if_ok) {
     if (!s_waiting_phone_status) {
+        APP_LOG(APP_LOG_LEVEL_WARNING, "remote: late status ignored: %s",
+                status ? status : "(null)");
         return;
     }
+    APP_LOG(APP_LOG_LEVEL_INFO, "remote: status received: %s", status ? status : "(null)");
     bool ok = status && (
         strstr(status, "saved") != NULL ||
         strstr(status, "Sent") != NULL ||

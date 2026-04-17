@@ -35,6 +35,9 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
         step_carb = t->value->int32;
     }
     if (def_bolus || def_carb || step_bolus || step_carb) {
+        APP_LOG(APP_LOG_LEVEL_INFO,
+                "Defaults from phone bolus=%ld carb=%ld step_bolus=%ld step_carb=%ld",
+                (long)def_bolus, (long)def_carb, (long)step_bolus, (long)step_carb);
         remote_menu_apply_phone_defaults(def_bolus, def_carb, step_bolus, step_carb);
     }
 
@@ -55,6 +58,12 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     }
 }
 
+static void outbox_sent(DictionaryIterator *iter, void *context) {
+    (void)iter;
+    (void)context;
+    APP_LOG(APP_LOG_LEVEL_INFO, "Outbox sent to phone");
+}
+
 static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, void *context) {
     (void)iter;
     (void)context;
@@ -64,6 +73,7 @@ static void outbox_failed(DictionaryIterator *iter, AppMessageResult reason, voi
 
 static void init(void) {
     app_message_register_inbox_received(inbox_received);
+    app_message_register_outbox_sent(outbox_sent);
     app_message_register_outbox_failed(outbox_failed);
     app_message_open(4096, 512);
     /* Menu stays under picker — confirm+send pops confirm, picker, and menu (3). */
