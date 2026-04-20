@@ -160,20 +160,23 @@ function sendCommand(type, amount) {
         return;
     }
 
-    // Check Trio is reachable before sending command
-    httpPost(settings.trioHost + '/api/pebble/v1/ping', '', function (pingResp) {
+    // Loop PebbleService uses /health endpoint for ping
+    // Trio does not have Pebble integration yet
+    httpPost(settings.trioHost + '/health', '', function (pingResp) {
         if (pingResp == null) {
-            console.log('Trio Remote: Trio not reachable, skipping command');
+            console.log('Trio Remote: Endpoint not reachable (Trio does not have Pebble integration)');
             var msg = {};
-            msg[K.CMD_STATUS] = 'Trio unreachable';
+            msg[K.CMD_STATUS] = 'Trio no Pebble';
             Pebble.sendAppMessage(msg, function () {
-                console.log('Trio Remote: unreachable sent to watch');
+                console.log('Trio Remote: status sent to watch');
             }, function (e) {
-                console.log('Trio Remote: unreachable send failed: ' + JSON.stringify(e || {}));
+                console.log('Trio Remote: status send failed: ' + JSON.stringify(e || {}));
             });
             return;
         }
         
+        // Trio does not have Pebble endpoints - use Loop PebbleService endpoints instead
+        // Note: User must have Loop with PebbleService running on same port
         var endpoint = type === 1 ? '/api/bolus' : '/api/carbs';
         var body = type === 1
             ? JSON.stringify({ units: amount / 10.0 })
