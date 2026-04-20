@@ -160,10 +160,24 @@ function sendCommand(type, amount) {
         return;
     }
 
-    var endpoint = type === 1 ? '/api/bolus' : '/api/carbs';
-    var body = type === 1
-        ? JSON.stringify({ units: amount / 10.0 })
-        : JSON.stringify({ grams: amount, absorptionHours: 3 });
+    // Check Trio is reachable before sending command
+    httpPost(settings.trioHost + '/api/pebble/v1/ping', '', function (pingResp) {
+        if (pingResp == null) {
+            console.log('Trio Remote: Trio not reachable, skipping command');
+            var msg = {};
+            msg[K.CMD_STATUS] = 'Trio unreachable';
+            Pebble.sendAppMessage(msg, function () {
+                console.log('Trio Remote: unreachable sent to watch');
+            }, function (e) {
+                console.log('Trio Remote: unreachable send failed: ' + JSON.stringify(e || {}));
+            });
+            return;
+        }
+        
+        var endpoint = type === 1 ? '/api/bolus' : '/api/carbs';
+        var body = type === 1
+            ? JSON.stringify({ units: amount / 10.0 })
+            : JSON.stringify({ grams: amount, absorptionHours: 3 });
 
     httpPost(settings.trioHost + endpoint, body, function (resp) {
         var statusMsg;
