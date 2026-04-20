@@ -179,23 +179,24 @@ function sendCommand(type, amount) {
             ? JSON.stringify({ units: amount / 10.0 })
             : JSON.stringify({ grams: amount, absorptionHours: 3 });
 
-    httpPost(settings.trioHost + endpoint, body, function (resp) {
-        var statusMsg;
-        if (resp == null) {
-            statusMsg = 'Trio unreachable';
-        } else {
-            statusMsg = 'Sent';
-            try {
-                var r = JSON.parse(resp || '{}');
-                statusMsg = r.message || r.status || statusMsg;
-            } catch (e) { /* ok */ }
-        }
-        var msg = {};
-        msg[K.CMD_STATUS] = statusMsg.substring(0, 63);
-        Pebble.sendAppMessage(msg, function () {
-            console.log('Trio Remote: status sent to watch: ' + msg[K.CMD_STATUS]);
-        }, function (e) {
-            console.log('Trio Remote: status send failed to watch: ' + JSON.stringify(e || {}));
+        httpPost(settings.trioHost + endpoint, body, function (resp) {
+            var statusMsg;
+            if (resp == null) {
+                statusMsg = 'Trio unreachable';
+            } else {
+                statusMsg = 'Sent';
+                try {
+                    var r = JSON.parse(resp || '{}');
+                    statusMsg = r.message || r.status || statusMsg;
+                } catch (e) { /* ok */ }
+            }
+            var msg = {};
+            msg[K.CMD_STATUS] = statusMsg.substring(0, 63);
+            Pebble.sendAppMessage(msg, function () {
+                console.log('Trio Remote: status sent to watch: ' + msg[K.CMD_STATUS]);
+            }, function (e) {
+                console.log('Trio Remote: status send failed to watch: ' + JSON.stringify(e || {}));
+            });
         });
     });
 }
