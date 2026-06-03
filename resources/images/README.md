@@ -1,7 +1,3 @@
-Place **`menu_icon.png`** here (exactly **25×25** pixels, PNG).
+Add **`menu_icon.png`** here (25×25 PNG). Copy from the watchface repo (`trio-pebble`):
 
-Copy from the main **trio-pebble** repo:
-
-`trio-pebble/resources/images/menu_icon.png`
-
-(if your fork uses `trio-pebble/images/menu_icon.png`, copy from there instead).
+- `resources/images/menu_icon.png` or `images/menu_icon.png` (whichever exists in your tree).

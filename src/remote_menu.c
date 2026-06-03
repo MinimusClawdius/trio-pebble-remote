@@ -1,9 +1,8 @@
 #include "remote_menu.h"
-#include "modules/remote_send_ui.h"
 #include <stdio.h>
 #include <string.h>
 
-/* Must match package.json messageKeys */
+/* Must match both package.json messageKeys and watchface trio_types.h */
 enum {
     KEY_CMD_TYPE = 7,
     KEY_CMD_AMOUNT = 8,
@@ -19,50 +18,20 @@ static SimpleMenuItem s_menu_items[REMOTE_MENU_ITEMS];
 
 static TextLayer *s_pick_title;
 static TextLayer *s_pick_value;
-static Layer *s_pick_chrome_layer;
+static TextLayer *s_pick_hint;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
 
-static int32_t s_default_bolus_tenths = 20;
-static int32_t s_default_carb_g = 15;
-static int32_t s_step_bolus_tenths = 1;
-static int32_t s_step_carb_g = 5;
-
-void remote_menu_apply_phone_defaults(int32_t default_bolus_tenths, int32_t default_carb_g,
-                                      int32_t bolus_step_tenths, int32_t carb_step_g) {
-    if (default_bolus_tenths > 0 && default_bolus_tenths <= 300) {
-        s_default_bolus_tenths = default_bolus_tenths;
-    }
-    if (default_carb_g > 0 && default_carb_g <= 250) {
-        s_default_carb_g = default_carb_g;
-    }
-    if (bolus_step_tenths > 0 && bolus_step_tenths <= 50) {
-        s_step_bolus_tenths = bolus_step_tenths;
-    }
-    if (carb_step_g > 0 && carb_step_g <= 25) {
-        s_step_carb_g = carb_step_g;
-    }
-}
-
-void remote_menu_send_to_phone(int32_t cmd_type, int32_t amount) {
+static void send_watch_command(int32_t cmd_type, int32_t amount) {
     DictionaryIterator *iter;
-    AppMessageResult begin_res = app_message_outbox_begin(&iter);
-    if (begin_res != APP_MSG_OK) {
-        APP_LOG(APP_LOG_LEVEL_ERROR, "remote: outbox_begin failed=%d type=%ld amount=%ld",
-                (int)begin_res, (long)cmd_type, (long)amount);
-        remote_send_ui_on_prepare_send_failed();
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+        vibes_double_pulse();
         return;
     }
     dict_write_int32(iter, KEY_CMD_TYPE, cmd_type);
     dict_write_int32(iter, KEY_CMD_AMOUNT, amount);
-    APP_LOG(APP_LOG_LEVEL_INFO, "remote: queue cmd type=%ld amount=%ld",
-            (long)cmd_type, (long)amount);
-    AppMessageResult send_res = app_message_outbox_send();
-    if (send_res != APP_MSG_OK) {
-        APP_LOG(APP_LOG_LEVEL_ERROR, "remote: outbox_send failed=%d type=%ld amount=%ld",
-                (int)send_res, (long)cmd_type, (long)amount);
-        remote_send_ui_on_prepare_send_failed();
-    }
+    app_message_outbox_send();
+    vibes_short_pulse();
 }
 
 static void picker_refresh_value_text(void) {
@@ -85,19 +54,20 @@ static void picker_back_handler(ClickRecognizerRef recognizer, void *context) {
 static void picker_select_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
-    remote_send_ui_push_confirm(s_pick_cmd_type, s_pick_amount);
+    send_watch_command(s_pick_cmd_type, s_pick_amount);
+    window_stack_pop(true);
 }
 
 static void picker_up_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount <= 300 - s_step_bolus_tenths) {
-            s_pick_amount += s_step_bolus_tenths;
+        if (s_pick_amount < 300) {
+            s_pick_amount++;
         }
     } else {
-        if (s_pick_amount <= 250 - s_step_carb_g) {
-            s_pick_amount += s_step_carb_g;
+        if (s_pick_amount < 250) {
+            s_pick_amount += 5;
         }
     }
     picker_refresh_value_text();
@@ -107,16 +77,12 @@ static void picker_down_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount > s_step_bolus_tenths) {
-            s_pick_amount -= s_step_bolus_tenths;
-        } else if (s_pick_amount > 1) {
-            s_pick_amount = 1;
+        if (s_pick_amount > 1) {
+            s_pick_amount--;
         }
     } else {
-        if (s_pick_amount > s_step_carb_g) {
-            s_pick_amount -= s_step_carb_g;
-        } else if (s_pick_amount > 1) {
-            s_pick_amount = 1;
+        if (s_pick_amount > 5) {
+            s_pick_amount -= 5;
         }
     }
     picker_refresh_value_text();
@@ -130,66 +96,29 @@ static void picker_click_config(void *context) {
     window_single_click_subscribe(BUTTON_ID_BACK, picker_back_handler);
 }
 
-static void pick_chrome_update_proc(Layer *layer, GContext *ctx) {
-    GRect r = layer_get_bounds(layer);
-#ifdef PBL_COLOR
-    graphics_context_set_fill_color(ctx, GColorDarkGray);
-#else
-    graphics_context_set_fill_color(ctx, GColorBlack);
-#endif
-    graphics_fill_rect(ctx, r, 0, GCornerNone);
-
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    int cx = (int)r.size.w / 2;
-    int h = (int)r.size.h;
-    int y_plus = h * 17 / 100;
-    int y_check = h * 48 / 100;
-    int y_minus = h * 81 / 100;
-    const int arm = 6;
-    const int thick = 3;
-
-    graphics_fill_rect(ctx, GRect((int16_t)(cx - arm), (int16_t)(y_plus - 1), (int16_t)(arm * 2), thick), 0, GCornerNone);
-    graphics_fill_rect(ctx, GRect((int16_t)(cx - 1), (int16_t)(y_plus - arm), thick, (int16_t)(arm * 2)), 0, GCornerNone);
-
-    graphics_fill_rect(ctx, GRect((int16_t)(cx - arm), (int16_t)(y_minus - 1), (int16_t)(arm * 2), thick), 0, GCornerNone);
-
-    graphics_fill_rect(ctx, GRect((int16_t)(cx - 8), (int16_t)(y_check - 1), 6, thick), 0, GCornerNone);
-    graphics_fill_rect(ctx, GRect((int16_t)(cx - 3), (int16_t)(y_check - 5), thick, 10), 0, GCornerNone);
-}
-
 static void pick_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
-    GRect content = remote_send_content_left_of_action_bar(&b);
-    GRect strip = remote_send_right_action_strip_rect(&b);
 
-    window_set_background_color(window, GColorWhite);
-
-    int16_t title_h = 40;
-    int16_t title_y = (int16_t)(content.origin.y + 4);
-    s_pick_title = text_layer_create(GRect(content.origin.x, title_y, content.size.w, title_h));
+    s_pick_title = text_layer_create(GRect(0, 12, b.size.w, 28));
     text_layer_set_background_color(s_pick_title, GColorClear);
-    text_layer_set_text_color(s_pick_title, GColorBlack);
     text_layer_set_text_alignment(s_pick_title, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_title, fonts_get_system_font(FONT_KEY_BITHAM_30_BLACK));
+    text_layer_set_font(s_pick_title, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
     text_layer_set_text(s_pick_title, s_pick_cmd_type == 1 ? "Bolus" : "Carbs");
     layer_add_child(root, text_layer_get_layer(s_pick_title));
 
-    int16_t val_y = (int16_t)(title_y + title_h - 2);
-    int16_t val_h = (int16_t)(content.origin.y + content.size.h - val_y - 6);
-    if (val_h < 52) {
-        val_h = 52;
-    }
-    s_pick_value = text_layer_create(GRect(content.origin.x, val_y, content.size.w, val_h));
+    s_pick_value = text_layer_create(GRect(0, 48, b.size.w, 44));
     text_layer_set_background_color(s_pick_value, GColorClear);
-    text_layer_set_text_color(s_pick_value, GColorBlack);
     text_layer_set_text_alignment(s_pick_value, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_value, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD));
+    text_layer_set_font(s_pick_value, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
     layer_add_child(root, text_layer_get_layer(s_pick_value));
 
-    s_pick_chrome_layer = layer_create(strip);
-    layer_set_update_proc(s_pick_chrome_layer, pick_chrome_update_proc);
-    layer_add_child(root, s_pick_chrome_layer);
+    s_pick_hint = text_layer_create(GRect(8, b.size.h - 44, b.size.w - 16, 40));
+    text_layer_set_background_color(s_pick_hint, GColorClear);
+    text_layer_set_text_alignment(s_pick_hint, GTextAlignmentCenter);
+    text_layer_set_font(s_pick_hint, fonts_get_system_font(FONT_KEY_GOTHIC_14));
+    text_layer_set_text(s_pick_hint, "UP/DOWN adjust\nSELECT send");
+    layer_add_child(root, text_layer_get_layer(s_pick_hint));
 
     window_set_click_config_provider(window, picker_click_config);
     picker_refresh_value_text();
@@ -199,14 +128,17 @@ static void pick_window_unload(Window *window) {
     (void)window;
     text_layer_destroy(s_pick_title);
     text_layer_destroy(s_pick_value);
-    layer_destroy(s_pick_chrome_layer);
-    s_pick_title = s_pick_value = NULL;
-    s_pick_chrome_layer = NULL;
+    text_layer_destroy(s_pick_hint);
+    s_pick_title = s_pick_value = s_pick_hint = NULL;
 }
 
-static void push_amount_picker(int32_t cmd_type, int32_t amount) {
+static void open_amount_picker(int32_t cmd_type) {
     s_pick_cmd_type = cmd_type;
-    s_pick_amount = amount;
+    if (cmd_type == 1) {
+        s_pick_amount = 20;
+    } else {
+        s_pick_amount = 15;
+    }
 
     if (!s_pick_window) {
         s_pick_window = window_create();
@@ -218,34 +150,14 @@ static void push_amount_picker(int32_t cmd_type, int32_t amount) {
     window_stack_push(s_pick_window, true);
 }
 
-static void open_amount_picker(int32_t cmd_type) {
-    if (cmd_type == 1) {
-        push_amount_picker(1, s_default_bolus_tenths);
-    } else {
-        push_amount_picker(2, s_default_carb_g);
-    }
-}
-
-void remote_menu_open_bolus_picker_preset(int32_t tenths) {
-    if (tenths < 1) {
-        return;
-    }
-    if (s_pick_window && window_stack_contains_window(s_pick_window)) {
-        s_pick_cmd_type = 1;
-        s_pick_amount = tenths;
-        picker_refresh_value_text();
-        return;
-    }
-    push_amount_picker(1, tenths);
-}
-
+/**
+ * Watch app: keep menu under picker so BACK from picker returns to menu.
+ * (Watchface pops menu first so the face shows behind the picker.)
+ */
 static void menu_select_cb(int index, void *context) {
     (void)context;
     if (index == 2) {
         window_stack_pop(true);
-        return;
-    }
-    if (remote_send_ui_blocks_remote()) {
         return;
     }
     open_amount_picker(index == 0 ? 1 : 2);
@@ -256,13 +168,13 @@ static void menu_window_load(Window *window) {
     GRect bounds = layer_get_bounds(root);
 
     s_menu_items[0] = (SimpleMenuItem){
-        .title = "Bolus",
-        .subtitle = NULL,
+        .title = "Remote bolus",
+        .subtitle = "0.1 U",
         .callback = menu_select_cb,
     };
     s_menu_items[1] = (SimpleMenuItem){
-        .title = "Carbs",
-        .subtitle = NULL,
+        .title = "Remote carbs",
+        .subtitle = "5 g",
         .callback = menu_select_cb,
     };
     s_menu_items[2] = (SimpleMenuItem){

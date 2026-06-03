@@ -1,30 +1,61 @@
-# Trio Remote (standalone repo for CloudPebble)
+# Trio Pebble Remote App
 
-This repository exists **only** so you can use **CloudPebble → Import from GitHub** on a normal project root: there is **no** “point CloudPebble at a subfolder” option for the main `trio-pebble` watchface repo.
+Companion watch app for the Trio Pebble CGM watchface. Use hardware buttons to send bolus/carb commands to Trio.
 
-| GitHub repo | CloudPebble project | Product |
-|-------------|---------------------|---------|
-| **`trio-pebble`** (watchface) | Project **A** — import this repo | Trio **watchface** |
-| **`trio-pebble-remote`** (this repo) | Project **B** — import **this** repo URL | **Trio Remote** watch **app** |
+## Quick Start
 
-Same machine / local dev: you can still build from **`trio-pebble/remote-app/`** if you use the Pebble CLI; that folder is the **monorepo copy** kept in sync with this repo when we release.
+### Prerequisites
+- Pebble SDK 3 installed ([CloudPebble](https://cloudpebble.net) or local SDK)
+- Pebble watch connected
+- Phone with Rebble app
 
-## First-time setup
+### Local Build (No Docker)
 
-1. Copy **`resources/images/menu_icon.png`** from **`trio-pebble`** (25×25 PNG) into this repo at the same path. Without it, `pebble build` will fail on the menu icon resource.
-2. If this repo is not on GitHub yet, create an empty repo **`trio-pebble-remote`**, then:
-   ```bash
-   cd /path/to/trio-pebble-remote
-   git remote add origin https://github.com/MinimusClawdius/trio-pebble-remote.git
-   git push -u origin main
-   ```
-3. In CloudPebble: **New project → Import from GitHub** → select **`trio-pebble-remote`**.
-4. Enable **Configurable** in project settings (matches `package.json`).
+```bash
+cd /home/jt/.openclaw/workspace/trio-pebble/remote-app
+pebble build
+pebble install --phone <your-phone-ip>
+```
 
-## Keeping in sync with `trio-pebble`
+**Build output:** Creates `trio-pebble-remote.zip` for installation.
 
-When the watchface changes **`pebble.messageKeys`**, UUID, or command JS, update **this** repo the same way (or copy `remote-app/src` from `trio-pebble` into `src/` here). See **`SYNC_WITH_TRIO_PEBBLE.md`**.
+### CloudPebble Build
 
-## UUID
+1. Go to [CloudPebble](https://cloudpebble.net)
+2. Import: `https://github.com/MinimusClawdius/trio-pebble-remote`
+3. Enable capabilities: **Configurable**, **Uses health**, **Uses location**
+4. Build and install
 
-Do **not** change the UUID to match the watchface — that would replace the watchface install. This app’s UUID is in **`package.json`**.
+## Installation
+
+After building:
+1. Open Rebble app on your phone
+2. Select your Pebble watch
+3. Find "Trio Remote" in the project list
+4. Install the `.zip` file
+
+## Usage
+
+- **UP/DOWN buttons:** Navigate menu
+- **SELECT (double-tap):** Confirm action
+- **BACK:** Exit
+
+Assign Trio Remote to a Quick Launch shortcut on your watch for quick access.
+
+## Architecture
+
+- `main.c` - App lifecycle and menu logic
+- `remote_menu.c/.h` - Bolus/carb menu implementation
+- `pkjs/` - PebbleKit JS for data fetching
+
+## Configuration
+
+- Menu icon: `resources/images/menu_icon.png` (25×25px PNG)
+- UUID: `fdd1d4b6-f2f2-4819-a26b-8ccad4264feb`
+- SDK version: 3
+
+## Notes
+
+- Only works with **Trio** as the data source
+- iPhone confirmation required for bolus commands
+- Not available with Dexcom Share or Nightscout
