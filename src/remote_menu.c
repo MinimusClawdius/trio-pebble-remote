@@ -66,9 +66,13 @@ static int s_progress_state; /* PROGRESS_* */
 static char s_progress_msg[72];
 static char s_progress_detail[40];
 static AppTimer *s_spin_timer;
-static int s_spin_frame;
+static AppTimer *s_min_anim_timer;
 static AppTimer *s_timeout_timer;
+static int s_spin_frame;
 static bool s_awaiting_result;
+static bool s_anim_min_elapsed;
+static int s_pending_result; /* 0=none, 1=ok, 2=fail */
+static char s_pending_msg[72];
 
 static bool s_touch_active;
 static int16_t s_touch_down_x;
@@ -89,7 +93,10 @@ static int32_t s_carb_step_grams = 5;
 static int32_t s_carb_default_grams = 15;
 
 #define TAP_SLOP_PX 22
-#define SEND_TIMEOUT_MS 20000
+/** Always show send animation at least this long on success (and before error UI). */
+#define ANIM_MIN_MS 5000
+/** If Trio never answers, keep anim this long then show error (5–10s range). */
+#define SEND_TIMEOUT_MS 10000
 #define SPIN_MS 180
 
 static void open_amount_picker(int32_t cmd_type);
@@ -98,6 +105,8 @@ static void progress_show_sending(void);
 static void progress_show_error(const char *msg);
 static void progress_close_app(void);
 static void progress_stop_timers(void);
+static void progress_try_finalize(void);
+static void progress_apply_pending(void);
 
 static void prefs_load_from_persist(void) {
     if (persist_exists(PERSIST_BOLUS_STEP)) s_bolus_step_tenths = persist_read_int(PERSIST_BOLUS_STEP);
@@ -197,23 +206,22 @@ void remote_menu_set_status(const char *status) {
 }
 
 void remote_menu_handle_result(int result, const char *message) {
-    if (!s_awaiting_result && result != 2) {
-        /* Ignore stray results when not sending (except hard errors). */
+    /* Only accept results while sending animation is active (or hard errors). */
+    if (s_progress_state != PROGRESS_SENDING && !s_awaiting_result) {
         if (result != 2) return;
     }
-    s_awaiting_result = false;
-    progress_stop_timers();
 
-    if (result == 1) {
-        /* Success → leave app so the active watchface returns. */
-        vibes_short_pulse();
-        progress_close_app();
-        return;
+    /* Queue result — do not tear down animation early. */
+    s_pending_result = (result == 1) ? 1 : 2;
+    if (message && message[0]) {
+        strncpy(s_pending_msg, message, sizeof(s_pending_msg) - 1);
+        s_pending_msg[sizeof(s_pending_msg) - 1] = '\0';
+    } else {
+        snprintf(s_pending_msg, sizeof(s_pending_msg), "%s",
+                 (result == 1) ? "Delivered" : "Send failed");
     }
-
-    /* Failure → persistent error screen until BACK / EXIT. */
-    vibes_double_pulse();
-    progress_show_error(message && message[0] ? message : "Send failed");
+    s_awaiting_result = false; /* network phase done; may still be in min-anim hold */
+    progress_try_finalize();
 }
 
 /* ---------- Progress window ---------- */
@@ -223,6 +231,10 @@ static void progress_stop_timers(void) {
         app_timer_cancel(s_spin_timer);
         s_spin_timer = NULL;
     }
+    if (s_min_anim_timer) {
+        app_timer_cancel(s_min_anim_timer);
+        s_min_anim_timer = NULL;
+    }
     if (s_timeout_timer) {
         app_timer_cancel(s_timeout_timer);
         s_timeout_timer = NULL;
@@ -231,8 +243,48 @@ static void progress_stop_timers(void) {
 
 static void progress_close_app(void) {
     progress_stop_timers();
-    /* Pop everything → exit watchapp → watchface. */
+    s_pending_result = 0;
+    s_awaiting_result = false;
     window_stack_pop_all(true);
+}
+
+static void progress_apply_pending(void) {
+    if (s_pending_result == 1) {
+        vibes_short_pulse();
+        progress_close_app();
+        return;
+    }
+    if (s_pending_result == 2) {
+        vibes_double_pulse();
+        /* Stop spin; keep window and show sticky error. */
+        if (s_spin_timer) {
+            app_timer_cancel(s_spin_timer);
+            s_spin_timer = NULL;
+        }
+        if (s_timeout_timer) {
+            app_timer_cancel(s_timeout_timer);
+            s_timeout_timer = NULL;
+        }
+        if (s_min_anim_timer) {
+            app_timer_cancel(s_min_anim_timer);
+            s_min_anim_timer = NULL;
+        }
+        progress_show_error(s_pending_msg[0] ? s_pending_msg : "Send failed");
+        s_pending_result = 0;
+    }
+}
+
+static void progress_try_finalize(void) {
+    if (s_progress_state != PROGRESS_SENDING) return;
+    if (!s_anim_min_elapsed) {
+        /* Keep anim playing until minimum duration. */
+        return;
+    }
+    if (s_pending_result == 0) {
+        /* Min elapsed but still waiting on network — keep spinning until timeout. */
+        return;
+    }
+    progress_apply_pending();
 }
 
 static void spin_timer_cb(void *data) {
@@ -244,11 +296,27 @@ static void spin_timer_cb(void *data) {
     s_spin_timer = app_timer_register(SPIN_MS, spin_timer_cb, NULL);
 }
 
+static void min_anim_timer_cb(void *data) {
+    (void)data;
+    s_min_anim_timer = NULL;
+    s_anim_min_elapsed = true;
+    progress_try_finalize();
+}
+
 static void timeout_timer_cb(void *data) {
     (void)data;
     s_timeout_timer = NULL;
-    if (!s_awaiting_result) return;
-    remote_menu_handle_result(2, "Timed out waiting for Trio");
+    if (s_progress_state != PROGRESS_SENDING) return;
+
+    /* Force failure if still no result after full wait window. */
+    if (s_pending_result == 0) {
+        s_pending_result = 2;
+        snprintf(s_pending_msg, sizeof(s_pending_msg), "Timed out waiting for Trio");
+        s_awaiting_result = false;
+    }
+    /* Ensure min elapsed so error can show (timeout is >= min). */
+    s_anim_min_elapsed = true;
+    progress_try_finalize();
 }
 
 static void progress_canvas_update(Layer *layer, GContext *ctx) {
@@ -315,10 +383,12 @@ static void progress_back(ClickRecognizerRef r, void *c) {
     (void)c;
     if (s_progress_state == PROGRESS_ERROR) {
         progress_close_app();
+        return;
     }
-    /* While sending, BACK cancels wait and exits */
+    /* While sending: cancel wait and exit */
     if (s_progress_state == PROGRESS_SENDING) {
         s_awaiting_result = false;
+        s_pending_result = 0;
         progress_close_app();
     }
 }
@@ -360,6 +430,9 @@ static void progress_show_sending(void) {
     progress_ensure_window();
     s_progress_state = PROGRESS_SENDING;
     s_spin_frame = 0;
+    s_anim_min_elapsed = false;
+    s_pending_result = 0;
+    s_pending_msg[0] = '\0';
     format_amount_parts();
     snprintf(s_progress_detail, sizeof(s_progress_detail), "%s %s", s_num_buf, s_unit_buf);
     s_progress_msg[0] = '\0';
@@ -376,12 +449,16 @@ static void progress_show_sending(void) {
 
     progress_stop_timers();
     s_spin_timer = app_timer_register(SPIN_MS, spin_timer_cb, NULL);
+    /* Hold animation at least ANIM_MIN_MS so success doesn't flash-exit. */
+    s_min_anim_timer = app_timer_register(ANIM_MIN_MS, min_anim_timer_cb, NULL);
+    /* No response by SEND_TIMEOUT_MS → error after full anim window. */
     s_timeout_timer = app_timer_register(SEND_TIMEOUT_MS, timeout_timer_cb, NULL);
 }
 
 static void progress_show_error(const char *msg) {
     progress_ensure_window();
     s_progress_state = PROGRESS_ERROR;
+    s_awaiting_result = false;
     strncpy(s_progress_msg, msg ? msg : "Failed", sizeof(s_progress_msg) - 1);
     s_progress_msg[sizeof(s_progress_msg) - 1] = '\0';
 
