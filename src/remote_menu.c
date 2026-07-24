@@ -10,46 +10,50 @@ enum {
     KEY_CMD_STATUS = 9,
 };
 
+/* Home hits */
 enum {
-    BTN_BOLUS = 0,
-    BTN_CARBS = 1,
-    BTN_COUNT = 2
+    HOME_BOLUS = 0,
+    HOME_CARBS = 1,
+    HOME_COUNT = 2
+};
+
+/* Picker hits */
+enum {
+    PICK_MINUS = 0,
+    PICK_PLUS = 1,
+    PICK_SEND = 2,
+    PICK_COUNT = 3
 };
 
 static Window *s_home_window;
 static Window *s_pick_window;
-static Window *s_confirm_window;
 
 static Layer *s_home_canvas;
-static TextLayer *s_home_status;
-static int s_focus_btn; /* hardware-button focus 0=bolus 1=carbs */
-static int s_press_btn; /* -1 none, else button under finger */
-static GRect s_btn_frame[BTN_COUNT];
+static TextLayer *s_home_status; /* only shown when there is a result */
+static int s_focus_home;
+static int s_press_home;
+static GRect s_home_btn[HOME_COUNT];
 
-static TextLayer *s_pick_title;
-static TextLayer *s_pick_value;
-static TextLayer *s_pick_unit;
-static TextLayer *s_pick_hint;
+static Layer *s_pick_canvas;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
-
-static TextLayer *s_confirm_title;
-static TextLayer *s_confirm_value;
-static TextLayer *s_confirm_unit;
-static TextLayer *s_confirm_hint;
-
-static char s_last_status[64] = "";
-static bool s_command_pending = false;
+static int s_press_pick; /* PICK_* or -1 */
+static GRect s_pick_minus;
+static GRect s_pick_plus;
+static GRect s_pick_send;
+static GRect s_pick_value_box;
 static char s_num_buf[16];
 static char s_unit_buf[8];
+
+static char s_last_status[64] = "";
 static char s_status_buf[72];
 
-/* Touch tap tracking */
 static bool s_touch_active;
 static int16_t s_touch_down_x;
 static int16_t s_touch_down_y;
-static int s_touch_down_btn;
+static int s_touch_down_id; /* home or pick id */
 static bool s_touch_subscribed;
+static enum { TOUCH_CTX_NONE, TOUCH_CTX_HOME, TOUCH_CTX_PICK } s_touch_ctx;
 
 enum {
     PERSIST_BOLUS_STEP = 1,
@@ -62,7 +66,10 @@ static int32_t s_bolus_default_tenths = 20;
 static int32_t s_carb_step_grams = 5;
 static int32_t s_carb_default_grams = 15;
 
-#define TAP_SLOP_PX 18
+#define TAP_SLOP_PX 22
+
+static void open_amount_picker(int32_t cmd_type);
+static void pick_adjust(int direction);
 
 static void prefs_load_from_persist(void) {
     if (persist_exists(PERSIST_BOLUS_STEP)) s_bolus_step_tenths = persist_read_int(PERSIST_BOLUS_STEP);
@@ -99,11 +106,16 @@ void remote_menu_apply_prefs(int32_t bolus_step_tenths, int32_t bolus_default_te
     }
 }
 
-static GFont font_screen_title(void) {
-    return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+static GFont font_home_label(void) {
+#ifdef PBL_COLOR
+    /* Largest bold face available for button labels */
+    return fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
+#else
+    return fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS);
+#endif
 }
 
-static GFont font_home_btn(void) {
+static GFont font_home_label_fallback(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
@@ -119,26 +131,44 @@ static GFont font_amount_unit(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
-static GFont font_hint(void) {
-    return fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
+static GFont font_pm(void) {
+    /* +/- must use a full glyph face — Bitham number faces often omit these. */
+    return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
+}
+
+static GFont font_send(void) {
+    return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
 static GFont font_status(void) {
+    return fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD);
+}
+
+static GFont font_title(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
 }
 
-static void format_amount_parts(int32_t cmd_type, int32_t amount) {
-    if (cmd_type == 1) {
-        int v = (int)amount;
+static void format_amount_parts(void) {
+    if (s_pick_cmd_type == 1) {
+        int v = (int)s_pick_amount;
         snprintf(s_num_buf, sizeof(s_num_buf), "%d.%d", v / 10, v % 10);
-        snprintf(s_unit_buf, sizeof(s_unit_buf), "units");
+        snprintf(s_unit_buf, sizeof(s_unit_buf), "U");
     } else {
-        snprintf(s_num_buf, sizeof(s_num_buf), "%ld", (long)amount);
-        snprintf(s_unit_buf, sizeof(s_unit_buf), "grams");
+        snprintf(s_num_buf, sizeof(s_num_buf), "%ld", (long)s_pick_amount);
+        snprintf(s_unit_buf, sizeof(s_unit_buf), "g");
     }
 }
 
-static void open_amount_picker(int32_t cmd_type);
+static void home_refresh_status_visibility(void) {
+    if (!s_home_status) return;
+    if (s_last_status[0]) {
+        layer_set_hidden(text_layer_get_layer(s_home_status), false);
+        snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_last_status);
+        text_layer_set_text(s_home_status, s_status_buf);
+    } else {
+        layer_set_hidden(text_layer_get_layer(s_home_status), true);
+    }
+}
 
 void remote_menu_set_status(const char *status) {
     if (!status) {
@@ -147,21 +177,10 @@ void remote_menu_set_status(const char *status) {
         strncpy(s_last_status, status, sizeof(s_last_status) - 1);
         s_last_status[sizeof(s_last_status) - 1] = '\0';
     }
-    s_command_pending = false;
-    if (s_home_status) {
-        if (s_last_status[0]) {
-            snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_last_status);
-        } else {
-            snprintf(s_status_buf, sizeof(s_status_buf), " ");
-        }
-        text_layer_set_text(s_home_status, s_status_buf);
-    }
-    if (s_home_canvas) {
-        layer_mark_dirty(s_home_canvas);
-    }
+    home_refresh_status_visibility();
 }
 
-static void send_watch_command(int32_t cmd_type, int32_t amount) {
+static void send_watch_command(void) {
     DictionaryIterator *iter;
     AppMessageResult begin = app_message_outbox_begin(&iter);
     if (begin != APP_MSG_OK) {
@@ -169,238 +188,329 @@ static void send_watch_command(int32_t cmd_type, int32_t amount) {
         remote_menu_set_status("Phone link busy");
         return;
     }
-    dict_write_int32(iter, KEY_CMD_TYPE, cmd_type);
-    dict_write_int32(iter, KEY_CMD_AMOUNT, amount);
+    dict_write_int32(iter, KEY_CMD_TYPE, s_pick_cmd_type);
+    dict_write_int32(iter, KEY_CMD_AMOUNT, s_pick_amount);
     AppMessageResult sent = app_message_outbox_send();
     if (sent != APP_MSG_OK) {
         vibes_double_pulse();
         remote_menu_set_status("Send failed");
         return;
     }
-    s_command_pending = true;
-    remote_menu_set_status(cmd_type == 1 ? "Sending bolus…" : "Sending carbs…");
+    remote_menu_set_status(s_pick_cmd_type == 1 ? "Sending bolus…" : "Sending carbs…");
     vibes_short_pulse();
-}
-
-static int hit_test_button(int16_t x, int16_t y) {
-    GPoint p = GPoint(x, y);
-    for (int i = 0; i < BTN_COUNT; i++) {
-        if (grect_contains_point(&s_btn_frame[i], &p)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static void activate_button(int btn) {
-    if (btn == BTN_BOLUS) {
-        open_amount_picker(1);
-    } else if (btn == BTN_CARBS) {
-        open_amount_picker(2);
-    }
-}
-
-/* ---------- Confirm ---------- */
-
-static void confirm_back(ClickRecognizerRef r, void *c) {
-    (void)r;
-    (void)c;
-    window_stack_pop(true);
-}
-
-static void confirm_select(ClickRecognizerRef r, void *c) {
-    (void)r;
-    (void)c;
-    send_watch_command(s_pick_cmd_type, s_pick_amount);
-    window_stack_pop(false);
+    /* Return home so status is visible */
     if (s_pick_window && window_stack_contains_window(s_pick_window)) {
         window_stack_pop(true);
     }
 }
 
-static void confirm_click_config(void *context) {
-    (void)context;
-    window_single_click_subscribe(BUTTON_ID_SELECT, confirm_select);
-    window_single_click_subscribe(BUTTON_ID_BACK, confirm_back);
+static void pick_adjust(int direction) {
+    if (s_pick_cmd_type == 1) {
+        int step = (int)s_bolus_step_tenths;
+        if (direction > 0) {
+            if (s_pick_amount + step <= 300) s_pick_amount += step;
+            else s_pick_amount = 300;
+        } else {
+            if (s_pick_amount > step) s_pick_amount -= step;
+            else s_pick_amount = step;
+        }
+    } else {
+        int step = (int)s_carb_step_grams;
+        if (direction > 0) {
+            if (s_pick_amount + step <= 250) s_pick_amount += step;
+            else s_pick_amount = 250;
+        } else {
+            if (s_pick_amount > step) s_pick_amount -= step;
+            else s_pick_amount = step;
+        }
+    }
+    if (s_pick_canvas) layer_mark_dirty(s_pick_canvas);
 }
 
-static void confirm_window_load(Window *window) {
-    Layer *root = window_get_root_layer(window);
-    GRect b = layer_get_bounds(root);
+static int home_hit(int16_t x, int16_t y) {
+    GPoint p = GPoint(x, y);
+    for (int i = 0; i < HOME_COUNT; i++) {
+        if (grect_contains_point(&s_home_btn[i], &p)) return i;
+    }
+    return -1;
+}
+
+static int pick_hit(int16_t x, int16_t y) {
+    GPoint p = GPoint(x, y);
+    if (grect_contains_point(&s_pick_minus, &p)) return PICK_MINUS;
+    if (grect_contains_point(&s_pick_plus, &p)) return PICK_PLUS;
+    if (grect_contains_point(&s_pick_send, &p)) return PICK_SEND;
+    return -1;
+}
+
+static void activate_home(int btn) {
+    if (btn == HOME_BOLUS) open_amount_picker(1);
+    else if (btn == HOME_CARBS) open_amount_picker(2);
+}
+
+/* ---------- Picker canvas (Loop-style) ---------- */
+
+static void pick_layout(GRect b) {
     const int w = b.size.w;
     const int h = b.size.h;
-    const int title_h = 40;
-    const int unit_h = 36;
-    const int hint_h = 56;
-    const int value_h = h - title_h - unit_h - hint_h - 12;
-    int value_y = title_h + 2;
+    const int pad = 10;
+    const int send_h = 52;
+    const int circle = (w < 180) ? 48 : 56;
 
-    s_confirm_title = text_layer_create(GRect(2, 2, w - 4, title_h));
-    text_layer_set_background_color(s_confirm_title, GColorClear);
-    text_layer_set_text_alignment(s_confirm_title, GTextAlignmentCenter);
-    text_layer_set_font(s_confirm_title, font_screen_title());
-    text_layer_set_text(s_confirm_title, s_pick_cmd_type == 1 ? "SEND BOLUS?" : "SEND CARBS?");
-    layer_add_child(root, text_layer_get_layer(s_confirm_title));
+    s_pick_send = GRect(pad, h - send_h - pad, w - 2 * pad, send_h);
 
-    format_amount_parts(s_pick_cmd_type, s_pick_amount);
+    int mid_y = h / 2 - 10;
+    s_pick_minus = GRect(pad, mid_y - circle / 2, circle, circle);
+    s_pick_plus = GRect(w - pad - circle, mid_y - circle / 2, circle, circle);
 
-    s_confirm_value = text_layer_create(GRect(2, value_y, w - 4, value_h));
-    text_layer_set_background_color(s_confirm_value, GColorClear);
-    text_layer_set_text_alignment(s_confirm_value, GTextAlignmentCenter);
-    text_layer_set_font(s_confirm_value, font_amount_number());
-    text_layer_set_text(s_confirm_value, s_num_buf);
-    layer_add_child(root, text_layer_get_layer(s_confirm_value));
-
-    s_confirm_unit = text_layer_create(GRect(2, value_y + value_h - 4, w - 4, unit_h));
-    text_layer_set_background_color(s_confirm_unit, GColorClear);
-    text_layer_set_text_alignment(s_confirm_unit, GTextAlignmentCenter);
-    text_layer_set_font(s_confirm_unit, font_amount_unit());
-    text_layer_set_text(s_confirm_unit, s_unit_buf);
-    layer_add_child(root, text_layer_get_layer(s_confirm_unit));
-
-    s_confirm_hint = text_layer_create(GRect(4, h - hint_h - 2, w - 8, hint_h));
-    text_layer_set_background_color(s_confirm_hint, GColorClear);
-    text_layer_set_text_alignment(s_confirm_hint, GTextAlignmentCenter);
-    text_layer_set_font(s_confirm_hint, font_hint());
-    text_layer_set_text(s_confirm_hint, "SELECT = send now\nBACK = edit");
-    layer_add_child(root, text_layer_get_layer(s_confirm_hint));
-
-    window_set_click_config_provider(window, confirm_click_config);
-    vibes_short_pulse();
+    int value_x = pad + circle + 6;
+    int value_w = w - 2 * (pad + circle + 6);
+    s_pick_value_box = GRect(value_x, mid_y - 40, value_w, 80);
 }
 
-static void confirm_window_unload(Window *window) {
-    (void)window;
-    text_layer_destroy(s_confirm_title);
-    text_layer_destroy(s_confirm_value);
-    text_layer_destroy(s_confirm_unit);
-    text_layer_destroy(s_confirm_hint);
-    s_confirm_title = s_confirm_value = s_confirm_unit = s_confirm_hint = NULL;
+static void draw_circle_button(GContext *ctx, GRect r, const char *label, bool pressed) {
+#ifdef PBL_COLOR
+    GColor fill = pressed ? GColorDarkGray : GColorDarkGreen;
+#else
+    GColor fill = pressed ? GColorDarkGray : GColorBlack;
+#endif
+    graphics_context_set_fill_color(ctx, fill);
+    /* Full disk */
+    graphics_fill_radial(ctx, r, GOvalScaleModeFitCircle, (uint16_t)(r.size.w / 2 + 1), 0, TRIG_MAX_ANGLE);
+
+    graphics_context_set_text_color(ctx, GColorWhite);
+    GRect tb = grect_inset(r, GEdgeInsets(r.size.h / 2 - 18, 4, 4, 4));
+    graphics_draw_text(ctx, label, font_pm(), tb, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
-static void open_confirm(void) {
-    if (!s_confirm_window) {
-        s_confirm_window = window_create();
-        window_set_window_handlers(s_confirm_window, (WindowHandlers){
-            .load = confirm_window_load,
-            .unload = confirm_window_unload,
-        });
-    }
-    window_stack_push(s_confirm_window, true);
+static void pick_canvas_update(Layer *layer, GContext *ctx) {
+    GRect b = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, b, 0, GCornerNone);
+
+    /* Title */
+    graphics_context_set_text_color(ctx, GColorWhite);
+    const char *title = (s_pick_cmd_type == 1) ? "Bolus" : "Carbs";
+    graphics_draw_text(ctx, title, font_title(), GRect(0, 6, b.size.w, 28),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+    format_amount_parts();
+
+    /* Center value + unit (Loop-style green amount) */
+#ifdef PBL_COLOR
+    graphics_context_set_text_color(ctx, GColorGreen);
+#else
+    graphics_context_set_text_color(ctx, GColorWhite);
+#endif
+    /* Combine number+unit in one big string for centering */
+    static char combined[24];
+    snprintf(combined, sizeof(combined), "%s%s", s_num_buf, s_unit_buf);
+    graphics_draw_text(ctx, combined, font_amount_number(), s_pick_value_box,
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+
+    draw_circle_button(ctx, s_pick_minus, "-", s_press_pick == PICK_MINUS);
+    draw_circle_button(ctx, s_pick_plus, "+", s_press_pick == PICK_PLUS);
+
+    /* Bottom Send pill */
+    bool send_p = (s_press_pick == PICK_SEND);
+#ifdef PBL_COLOR
+    graphics_context_set_fill_color(ctx, send_p ? GColorDarkGreen : GColorGreen);
+#else
+    graphics_context_set_fill_color(ctx, send_p ? GColorDarkGray : GColorWhite);
+#endif
+    graphics_fill_rect(ctx, s_pick_send, s_pick_send.size.h / 2, GCornersAll);
+
+#ifdef PBL_COLOR
+    graphics_context_set_text_color(ctx, GColorBlack);
+#else
+    graphics_context_set_text_color(ctx, send_p ? GColorWhite : GColorBlack);
+#endif
+    graphics_draw_text(ctx, "Send", font_send(),
+                       grect_inset(s_pick_send, GEdgeInsets(s_pick_send.size.h / 2 - 16, 4, 4, 4)),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
-/* ---------- Amount picker ---------- */
-
-static void picker_refresh_value_text(void) {
-    format_amount_parts(s_pick_cmd_type, s_pick_amount);
-    if (s_pick_value) text_layer_set_text(s_pick_value, s_num_buf);
-    if (s_pick_unit) text_layer_set_text(s_pick_unit, s_unit_buf);
+static void pick_up(ClickRecognizerRef r, void *c) {
+    (void)r;
+    (void)c;
+    pick_adjust(+1);
 }
 
-static void picker_back_handler(ClickRecognizerRef recognizer, void *context) {
-    (void)recognizer;
-    (void)context;
+static void pick_down(ClickRecognizerRef r, void *c) {
+    (void)r;
+    (void)c;
+    pick_adjust(-1);
+}
+
+static void pick_select(ClickRecognizerRef r, void *c) {
+    (void)r;
+    (void)c;
+    send_watch_command();
+}
+
+static void pick_back(ClickRecognizerRef r, void *c) {
+    (void)r;
+    (void)c;
     window_stack_pop(true);
 }
 
-static void picker_select_handler(ClickRecognizerRef recognizer, void *context) {
-    (void)recognizer;
+static void pick_click_config(void *context) {
     (void)context;
-    open_confirm();
+    window_single_click_subscribe(BUTTON_ID_UP, pick_up);
+    window_single_click_subscribe(BUTTON_ID_DOWN, pick_down);
+    window_single_click_subscribe(BUTTON_ID_SELECT, pick_select);
+    window_single_click_subscribe(BUTTON_ID_BACK, pick_back);
+    window_single_repeating_click_subscribe(BUTTON_ID_UP, 80, pick_up);
+    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 80, pick_down);
 }
 
-static void picker_up_handler(ClickRecognizerRef recognizer, void *context) {
-    (void)recognizer;
+static void pick_activate(int id) {
+    if (id == PICK_MINUS) pick_adjust(-1);
+    else if (id == PICK_PLUS) pick_adjust(+1);
+    else if (id == PICK_SEND) send_watch_command();
+}
+
+#if defined(PBL_TOUCH)
+static void global_touch_handler(const TouchEvent *event, void *context) {
     (void)context;
-    if (s_pick_cmd_type == 1) {
-        if (s_pick_amount + s_bolus_step_tenths <= 300)
-            s_pick_amount += s_bolus_step_tenths;
-        else
-            s_pick_amount = 300;
-    } else {
-        if (s_pick_amount + s_carb_step_grams <= 250)
-            s_pick_amount += s_carb_step_grams;
-        else
-            s_pick_amount = 250;
+    if (!event) return;
+    Window *top = window_stack_get_top_window();
+
+    if (s_touch_ctx == TOUCH_CTX_HOME && top == s_home_window) {
+        switch (event->type) {
+            case TouchEvent_Touchdown:
+                s_touch_active = true;
+                s_touch_down_x = event->x;
+                s_touch_down_y = event->y;
+                s_touch_down_id = home_hit(event->x, event->y);
+                s_press_home = s_touch_down_id;
+                if (s_press_home >= 0) s_focus_home = s_press_home;
+                if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+                break;
+            case TouchEvent_PositionUpdate:
+                if (!s_touch_active) break;
+                if (home_hit(event->x, event->y) != s_touch_down_id) s_press_home = -1;
+                else s_press_home = s_touch_down_id;
+                if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+                break;
+            case TouchEvent_Liftoff: {
+                if (!s_touch_active) break;
+                s_touch_active = false;
+                int dx = event->x - s_touch_down_x;
+                int dy = event->y - s_touch_down_y;
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+                int up = home_hit(event->x, event->y);
+                bool tap = (dx <= TAP_SLOP_PX && dy <= TAP_SLOP_PX && s_touch_down_id >= 0 && up == s_touch_down_id);
+                s_press_home = -1;
+                if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+                if (tap) activate_home(s_touch_down_id);
+                s_touch_down_id = -1;
+                break;
+            }
+            default:
+                break;
+        }
+        return;
     }
-    picker_refresh_value_text();
-}
 
-static void picker_down_handler(ClickRecognizerRef recognizer, void *context) {
-    (void)recognizer;
-    (void)context;
-    if (s_pick_cmd_type == 1) {
-        if (s_pick_amount > s_bolus_step_tenths)
-            s_pick_amount -= s_bolus_step_tenths;
-        else
-            s_pick_amount = s_bolus_step_tenths;
-    } else {
-        if (s_pick_amount > s_carb_step_grams)
-            s_pick_amount -= s_carb_step_grams;
-        else
-            s_pick_amount = s_carb_step_grams;
+    if (s_touch_ctx == TOUCH_CTX_PICK && top == s_pick_window) {
+        switch (event->type) {
+            case TouchEvent_Touchdown:
+                s_touch_active = true;
+                s_touch_down_x = event->x;
+                s_touch_down_y = event->y;
+                s_touch_down_id = pick_hit(event->x, event->y);
+                s_press_pick = s_touch_down_id;
+                if (s_pick_canvas) layer_mark_dirty(s_pick_canvas);
+                break;
+            case TouchEvent_PositionUpdate:
+                if (!s_touch_active) break;
+                if (pick_hit(event->x, event->y) != s_touch_down_id) s_press_pick = -1;
+                else s_press_pick = s_touch_down_id;
+                if (s_pick_canvas) layer_mark_dirty(s_pick_canvas);
+                break;
+            case TouchEvent_Liftoff: {
+                if (!s_touch_active) break;
+                s_touch_active = false;
+                int dx = event->x - s_touch_down_x;
+                int dy = event->y - s_touch_down_y;
+                if (dx < 0) dx = -dx;
+                if (dy < 0) dy = -dy;
+                int up = pick_hit(event->x, event->y);
+                bool tap = (dx <= TAP_SLOP_PX && dy <= TAP_SLOP_PX && s_touch_down_id >= 0 && up == s_touch_down_id);
+                int id = s_touch_down_id;
+                s_press_pick = -1;
+                s_touch_down_id = -1;
+                if (s_pick_canvas) layer_mark_dirty(s_pick_canvas);
+                if (tap) pick_activate(id);
+                break;
+            }
+            default:
+                break;
+        }
     }
-    picker_refresh_value_text();
+}
+#endif
+
+static void touch_resubscribe(int ctx) {
+#if defined(PBL_TOUCH)
+    s_touch_ctx = ctx;
+    s_touch_active = false;
+    s_press_home = -1;
+    s_press_pick = -1;
+    if (!touch_service_is_enabled()) {
+        s_touch_subscribed = false;
+        return;
+    }
+    if (!s_touch_subscribed) {
+        touch_service_subscribe(global_touch_handler, NULL);
+        s_touch_subscribed = true;
+    }
+#else
+    (void)ctx;
+#endif
 }
 
-static void picker_click_config(void *context) {
-    (void)context;
-    window_single_click_subscribe(BUTTON_ID_SELECT, picker_select_handler);
-    window_single_click_subscribe(BUTTON_ID_UP, picker_up_handler);
-    window_single_click_subscribe(BUTTON_ID_DOWN, picker_down_handler);
-    window_single_click_subscribe(BUTTON_ID_BACK, picker_back_handler);
-    window_single_repeating_click_subscribe(BUTTON_ID_UP, 80, picker_up_handler);
-    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, 80, picker_down_handler);
+static void touch_stop(void) {
+#if defined(PBL_TOUCH)
+    s_touch_ctx = TOUCH_CTX_NONE;
+    s_touch_active = false;
+    if (s_touch_subscribed) {
+        touch_service_unsubscribe();
+        s_touch_subscribed = false;
+    }
+#endif
+}
+
+static void pick_appear(Window *window) {
+    (void)window;
+    touch_resubscribe(TOUCH_CTX_PICK);
+}
+
+static void pick_disappear(Window *window) {
+    (void)window;
+    /* home will resubscribe on appear */
 }
 
 static void pick_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
-    const int w = b.size.w;
-    const int h = b.size.h;
-    const int title_h = 40;
-    const int unit_h = 36;
-    const int hint_h = 52;
-    const int value_h = h - title_h - unit_h - hint_h - 8;
-    int value_y = title_h;
+    pick_layout(b);
+    s_press_pick = -1;
 
-    s_pick_title = text_layer_create(GRect(2, 2, w - 4, title_h));
-    text_layer_set_background_color(s_pick_title, GColorClear);
-    text_layer_set_text_alignment(s_pick_title, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_title, font_screen_title());
-    text_layer_set_text(s_pick_title, s_pick_cmd_type == 1 ? "BOLUS" : "CARBS");
-    layer_add_child(root, text_layer_get_layer(s_pick_title));
+    s_pick_canvas = layer_create(b);
+    layer_set_update_proc(s_pick_canvas, pick_canvas_update);
+    layer_add_child(root, s_pick_canvas);
 
-    s_pick_value = text_layer_create(GRect(2, value_y, w - 4, value_h));
-    text_layer_set_background_color(s_pick_value, GColorClear);
-    text_layer_set_text_alignment(s_pick_value, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_value, font_amount_number());
-    layer_add_child(root, text_layer_get_layer(s_pick_value));
-
-    s_pick_unit = text_layer_create(GRect(2, value_y + value_h - 2, w - 4, unit_h));
-    text_layer_set_background_color(s_pick_unit, GColorClear);
-    text_layer_set_text_alignment(s_pick_unit, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_unit, font_amount_unit());
-    layer_add_child(root, text_layer_get_layer(s_pick_unit));
-
-    s_pick_hint = text_layer_create(GRect(4, h - hint_h - 2, w - 8, hint_h));
-    text_layer_set_background_color(s_pick_hint, GColorClear);
-    text_layer_set_text_alignment(s_pick_hint, GTextAlignmentCenter);
-    text_layer_set_font(s_pick_hint, font_hint());
-    text_layer_set_text(s_pick_hint, "UP/DOWN  adjust\nSELECT  confirm");
-    layer_add_child(root, text_layer_get_layer(s_pick_hint));
-
-    window_set_click_config_provider(window, picker_click_config);
-    picker_refresh_value_text();
+    window_set_click_config_provider(window, pick_click_config);
+    window_set_background_color(window, GColorBlack);
 }
 
 static void pick_window_unload(Window *window) {
     (void)window;
-    text_layer_destroy(s_pick_title);
-    text_layer_destroy(s_pick_value);
-    text_layer_destroy(s_pick_unit);
-    text_layer_destroy(s_pick_hint);
-    s_pick_title = s_pick_value = s_pick_unit = s_pick_hint = NULL;
+    layer_destroy(s_pick_canvas);
+    s_pick_canvas = NULL;
 }
 
 static void open_amount_picker(int32_t cmd_type) {
@@ -411,75 +521,88 @@ static void open_amount_picker(int32_t cmd_type) {
         window_set_window_handlers(s_pick_window, (WindowHandlers){
             .load = pick_window_load,
             .unload = pick_window_unload,
+            .appear = pick_appear,
+            .disappear = pick_disappear,
         });
     }
     window_stack_push(s_pick_window, true);
 }
 
-/* ---------- Home: two big buttons (+ touch) ---------- */
+/* ---------- Home ---------- */
+
+static void home_layout(GRect bounds) {
+    const int pad = 8;
+    const int gap = 12;
+    /* Full height for two buttons — no instructional footer reserved */
+    int usable = bounds.size.h - pad * 2 - gap;
+    int btn_h = usable / 2;
+    int w = bounds.size.w - pad * 2;
+    s_home_btn[HOME_BOLUS] = GRect(pad, pad, w, btn_h);
+    s_home_btn[HOME_CARBS] = GRect(pad, pad + btn_h + gap, w, btn_h);
+}
 
 static void home_canvas_update(Layer *layer, GContext *ctx) {
     GRect b = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
 
-    for (int i = 0; i < BTN_COUNT; i++) {
-        GRect f = s_btn_frame[i];
-        bool pressed = (s_press_btn == i);
-        bool focused = (s_focus_btn == i);
+    for (int i = 0; i < HOME_COUNT; i++) {
+        GRect f = s_home_btn[i];
+        bool pressed = (s_press_home == i);
+        bool focused = (s_focus_home == i);
 
-        GColor fill = pressed ? GColorBlack : GColorWhite;
+#ifdef PBL_COLOR
+        GColor fill = pressed ? GColorDarkGreen : GColorGreen;
+        GColor ink = GColorBlack;
+#else
+        GColor fill = pressed ? GColorDarkGray : GColorWhite;
         GColor ink = pressed ? GColorWhite : GColorBlack;
+#endif
         graphics_context_set_fill_color(ctx, fill);
-        graphics_fill_rect(ctx, f, 8, GCornersAll);
+        graphics_fill_rect(ctx, f, 14, GCornersAll);
 
-        graphics_context_set_stroke_color(ctx, GColorBlack);
-        graphics_context_set_stroke_width(ctx, focused || pressed ? 4 : 2);
-        graphics_draw_round_rect(ctx, f, 8);
+        if (focused && !pressed) {
+            graphics_context_set_stroke_color(ctx, GColorWhite);
+            graphics_context_set_stroke_width(ctx, 3);
+            graphics_draw_round_rect(ctx, grect_inset(f, GEdgeInsets(2)), 12);
+        }
 
-        const char *label = (i == BTN_BOLUS) ? "BOLUS" : "CARBS";
+        const char *label = (i == HOME_BOLUS) ? "Bolus" : "Carbs";
         graphics_context_set_text_color(ctx, ink);
-        GRect text_box = grect_inset(f, GEdgeInsets(f.size.h / 2 - 18, 8, 8, 8));
-        graphics_draw_text(ctx, label, font_home_btn(), text_box,
+        /* ~75% of button height for the label */
+        int text_h = (f.size.h * 3) / 4;
+        int text_y = f.origin.y + (f.size.h - text_h) / 2;
+        GRect text_box = GRect(f.origin.x + 6, text_y, f.size.w - 12, text_h);
+        /* Prefer Bitham; if letters look odd on some builds Gothic still large enough via box */
+        graphics_draw_text(ctx, label, font_home_label_fallback(), text_box,
                            GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     }
-}
-
-static void home_layout_buttons(GRect bounds) {
-    const int status_h = 40;
-    const int gap = 10;
-    const int pad = 8;
-    int usable_h = bounds.size.h - status_h - pad * 2 - gap;
-    int btn_h = usable_h / 2;
-    int w = bounds.size.w - pad * 2;
-    s_btn_frame[BTN_BOLUS] = GRect(pad, pad, w, btn_h);
-    s_btn_frame[BTN_CARBS] = GRect(pad, pad + btn_h + gap, w, btn_h);
 }
 
 static void home_up(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    s_focus_btn = BTN_BOLUS;
+    s_focus_home = HOME_BOLUS;
     if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
 static void home_down(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    s_focus_btn = BTN_CARBS;
+    s_focus_home = HOME_CARBS;
     if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
 static void home_select(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    activate_button(s_focus_btn);
+    activate_home(s_focus_home);
 }
 
 static void home_back(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    window_stack_pop(true); /* leave app */
+    window_stack_pop(true);
 }
 
 static void home_click_config(void *context) {
@@ -490,135 +613,46 @@ static void home_click_config(void *context) {
     window_single_click_subscribe(BUTTON_ID_BACK, home_back);
 }
 
-#if defined(PBL_TOUCH)
-static void home_touch_handler(const TouchEvent *event, void *context) {
-    (void)context;
-    if (!event) return;
-    /* Only handle home while it is top window */
-    if (!s_home_window || window_stack_get_top_window() != s_home_window) {
-        return;
-    }
-
-    switch (event->type) {
-        case TouchEvent_Touchdown: {
-            s_touch_active = true;
-            s_touch_down_x = event->x;
-            s_touch_down_y = event->y;
-            s_touch_down_btn = hit_test_button(event->x, event->y);
-            s_press_btn = s_touch_down_btn;
-            if (s_press_btn >= 0) s_focus_btn = s_press_btn;
-            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
-            break;
-        }
-        case TouchEvent_PositionUpdate: {
-            if (!s_touch_active) break;
-            int btn = hit_test_button(event->x, event->y);
-            /* cancel press highlight if finger leaves original button */
-            if (btn != s_touch_down_btn) {
-                s_press_btn = -1;
-            } else {
-                s_press_btn = btn;
-            }
-            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
-            break;
-        }
-        case TouchEvent_Liftoff: {
-            if (!s_touch_active) break;
-            s_touch_active = false;
-            int dx = event->x - s_touch_down_x;
-            int dy = event->y - s_touch_down_y;
-            if (dx < 0) dx = -dx;
-            if (dy < 0) dy = -dy;
-            int up_btn = hit_test_button(event->x, event->y);
-            bool is_tap = (dx <= TAP_SLOP_PX && dy <= TAP_SLOP_PX &&
-                           s_touch_down_btn >= 0 && up_btn == s_touch_down_btn);
-            s_press_btn = -1;
-            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
-            if (is_tap) {
-                activate_button(s_touch_down_btn);
-            }
-            s_touch_down_btn = -1;
-            break;
-        }
-        default:
-            break;
-    }
-}
-#endif
-
-static void home_touch_subscribe_if_needed(void) {
-#if defined(PBL_TOUCH)
-    if (s_touch_subscribed) return;
-    if (!touch_service_is_enabled()) {
-        /* Still usable with side buttons */
-        return;
-    }
-    touch_service_subscribe(home_touch_handler, NULL);
-    s_touch_subscribed = true;
-#endif
-}
-
-static void home_touch_unsubscribe_if_needed(void) {
-#if defined(PBL_TOUCH)
-    if (!s_touch_subscribed) return;
-    touch_service_unsubscribe();
-    s_touch_subscribed = false;
-#endif
-}
-
 static void home_appear(Window *window) {
     (void)window;
-    home_touch_subscribe_if_needed();
-    s_press_btn = -1;
+    touch_resubscribe(TOUCH_CTX_HOME);
+    s_press_home = -1;
+    home_refresh_status_visibility();
     if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
 static void home_disappear(Window *window) {
     (void)window;
-    home_touch_unsubscribe_if_needed();
-    s_touch_active = false;
-    s_press_btn = -1;
 }
 
 static void home_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
-    const int w = b.size.w;
-    const int h = b.size.h;
-    const int status_h = 40;
+    home_layout(b);
+    s_focus_home = HOME_BOLUS;
+    s_press_home = -1;
 
-    home_layout_buttons(b);
-    s_focus_btn = BTN_BOLUS;
-    s_press_btn = -1;
-    s_touch_down_btn = -1;
+    window_set_background_color(window, GColorBlack);
 
-    s_home_canvas = layer_create(GRect(0, 0, w, h - status_h));
+    s_home_canvas = layer_create(b);
     layer_set_update_proc(s_home_canvas, home_canvas_update);
     layer_add_child(root, s_home_canvas);
 
-    s_home_status = text_layer_create(GRect(4, h - status_h, w - 8, status_h - 2));
+    /* Optional thin status only when a send result exists — no “tap here” copy */
+    s_home_status = text_layer_create(GRect(6, b.size.h - 28, b.size.w - 12, 24));
     text_layer_set_background_color(s_home_status, GColorClear);
+    text_layer_set_text_color(s_home_status, GColorWhite);
     text_layer_set_text_alignment(s_home_status, GTextAlignmentCenter);
     text_layer_set_font(s_home_status, font_status());
-    if (s_last_status[0]) {
-        snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_last_status);
-    } else {
-#if defined(PBL_TOUCH)
-        snprintf(s_status_buf, sizeof(s_status_buf), "Tap BOLUS or CARBS");
-#else
-        snprintf(s_status_buf, sizeof(s_status_buf), "UP/DOWN + SELECT");
-#endif
-    }
-    text_layer_set_text(s_home_status, s_status_buf);
     layer_add_child(root, text_layer_get_layer(s_home_status));
+    layer_set_hidden(text_layer_get_layer(s_home_status), true);
 
-    /* Buttons always available; touch is additive on capable hardware */
     window_set_click_config_provider(window, home_click_config);
 }
 
 static void home_window_unload(Window *window) {
     (void)window;
-    home_touch_unsubscribe_if_needed();
+    touch_stop();
     layer_destroy(s_home_canvas);
     s_home_canvas = NULL;
     text_layer_destroy(s_home_status);
@@ -638,11 +672,7 @@ void remote_menu_init(void) {
 }
 
 void remote_menu_deinit(void) {
-    home_touch_unsubscribe_if_needed();
-    if (s_confirm_window) {
-        window_destroy(s_confirm_window);
-        s_confirm_window = NULL;
-    }
+    touch_stop();
     if (s_pick_window) {
         window_destroy(s_pick_window);
         s_pick_window = NULL;
