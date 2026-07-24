@@ -9,7 +9,8 @@ var K = {
     BOLUS_STEP_TENTHS: 50,
     BOLUS_DEFAULT_TENTHS: 51,
     CARB_STEP_GRAMS: 52,
-    CARB_DEFAULT_GRAMS: 53
+    CARB_DEFAULT_GRAMS: 53,
+    CMD_RESULT: 54
 };
 
 var DEFAULT_TRIO_HOST = 'http://127.0.0.1:8080';
@@ -121,6 +122,23 @@ function sendStatus(text) {
     );
 }
 
+/** result: 1 = success (app exits), 2 = failure (error screen). */
+function sendResult(ok, message) {
+    var msg = {};
+    msg[K.CMD_RESULT] = ok ? 1 : 2;
+    msg[K.CMD_STATUS] = String(message || (ok ? 'OK' : 'Failed')).substring(0, 63);
+    console.log('[TrioRemote] result ok=' + ok + ' msg=' + msg[K.CMD_STATUS]);
+    Pebble.sendAppMessage(
+        msg,
+        function () {
+            console.log('[TrioRemote] result delivered');
+        },
+        function (e) {
+            console.log('[TrioRemote] result fail: ' + JSON.stringify(e));
+        }
+    );
+}
+
 function pushPrefsToWatch() {
     normalizePrefs();
     var msg = {};
@@ -188,14 +206,17 @@ function sendCommand(type, amount) {
 
     var url = settings.trioHost + endpoint;
     console.log('[TrioRemote] POST ' + url + ' body=' + body);
-    sendStatus(type === 1 ? 'Sending bolus…' : 'Sending carbs…');
 
     httpPost(url, body, function (ok, code, resp) {
         var statusMsg = statusFromResponse(ok, code, resp, type === 1 ? 'Bolus OK' : 'Carbs OK');
         if (statusMsg === 'delivered') {
             statusMsg = type === 1 ? 'Bolus delivered' : 'Carbs delivered';
         }
-        sendStatus(statusMsg);
+        if (ok) {
+            sendResult(true, statusMsg);
+        } else {
+            sendResult(false, statusMsg);
+        }
     });
 }
 
