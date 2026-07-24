@@ -1,72 +1,61 @@
-// Trio Remote — minimal PebbleKit JS (must match watchface message key indices)
+// Trio Remote — PebbleKit JS: watch AppMessage → HTTP POST Trio loopback
+// Keys must match package.json messageKeys / watchface.
 var K = {
-    GLUCOSE: 0, TREND: 1, DELTA: 2, IOB: 3, COB: 4,
-    LAST_LOOP: 5, GLUCOSE_STALE: 6, CMD_TYPE: 7, CMD_AMOUNT: 8,
-    CMD_STATUS: 9, GRAPH_DATA: 10, GRAPH_COUNT: 11, LOOP_STATUS: 12,
-    UNITS: 13, PUMP_STATUS: 14, RESERVOIR: 15,
-    CONFIG_FACE_TYPE: 16, CONFIG_DATA_SOURCE: 17,
-    CONFIG_HIGH_THRESHOLD: 18, CONFIG_LOW_THRESHOLD: 19,
-    CONFIG_ALERT_HIGH_ENABLED: 20, CONFIG_ALERT_LOW_ENABLED: 21,
-    CONFIG_ALERT_URGENT_LOW: 22, CONFIG_ALERT_SNOOZE_MIN: 23,
-    CONFIG_COLOR_SCHEME: 24,
-    BATTERY_PHONE: 25, WEATHER_TEMP: 26, WEATHER_ICON: 27,
-    STEPS: 28, HEART_RATE: 29,
-    PREDICTIONS_DATA: 30, PREDICTIONS_COUNT: 31,
-    PUMP_BATTERY: 32, SENSOR_AGE: 33,
-    CONFIG_CHANGED: 34, TAP_ACTION: 35,
-    CONFIG_WEATHER_ENABLED: 36,
-    CONFIG_COMP_SLOT_0: 37, CONFIG_COMP_SLOT_1: 38,
-    CONFIG_COMP_SLOT_2: 39, CONFIG_COMP_SLOT_3: 40,
-    CONFIG_CLOCK_24H: 41,
-    CONFIG_GRAPH_SCALE_MODE: 42,
-    CONFIG_GRAPH_TIME_RANGE: 43,
-    TRIO_LINK: 44
+    CMD_TYPE: 7,
+    CMD_AMOUNT: 8,
+    CMD_STATUS: 9
 };
 
+var DEFAULT_TRIO_HOST = 'http://127.0.0.1:8080';
+
 var settings = {
+    // Remote always talks to Trio local API (ignore legacy Dexcom/NS sources).
     dataSource: 0,
-    trioHost: 'http://127.0.0.1:8080',
-    faceType: 0,
-    colorScheme: 0,
-    highThreshold: 180,
-    lowThreshold: 70,
-    urgentLow: 55,
-    alertHighEnabled: true,
-    alertLowEnabled: true,
-    alertSnoozeMin: 15,
-    weatherEnabled: true,
-    glucoseUnits: 'mgdl',
-    compSlot0: 1,
-    compSlot1: 5,
-    compSlot2: 6,
-    compSlot3: 0,
-    clock24h: true,
-    graphScaleMode: 0,
-    graphTimeRange: 0
+    trioHost: DEFAULT_TRIO_HOST
 };
+
+function normalizeTrioHost() {
+    var h = settings.trioHost == null ? '' : String(settings.trioHost).replace(/^\s+|\s+$/g, '');
+    if (!h) {
+        h = DEFAULT_TRIO_HOST;
+    } else {
+        if (h.indexOf('://') < 0) h = 'http://' + h;
+        h = h.replace(/\/+$/, '');
+        if (h.indexOf('http://') !== 0 && h.indexOf('https://') !== 0) {
+            h = DEFAULT_TRIO_HOST;
+        }
+    }
+    settings.trioHost = h;
+    return h;
+}
 
 function loadSettings() {
     try {
-        var saved = localStorage.getItem('trio_settings');
+        var saved = localStorage.getItem('trio_remote_settings');
+        if (!saved) {
+            // Migrate older key if present
+            saved = localStorage.getItem('trio_settings');
+        }
         if (saved) {
             var parsed = JSON.parse(saved);
-            for (var key in parsed) {
-                if (parsed.hasOwnProperty(key)) settings[key] = parsed[key];
-            }
+            if (parsed.trioHost != null) settings.trioHost = parsed.trioHost;
+            if (parsed.dataSource != null) settings.dataSource = parsed.dataSource;
         }
     } catch (e) {
-        console.log('Trio Remote: settings load error ' + e);
+        console.log('[TrioRemote] settings load error ' + e);
     }
+    normalizeTrioHost();
+    // Companion app is Trio-only for commands
+    settings.dataSource = 0;
 }
 
 function saveSettings() {
     try {
-        localStorage.setItem('trio_settings', JSON.stringify(settings));
+        localStorage.setItem(
+            'trio_remote_settings',
+            JSON.stringify({ trioHost: settings.trioHost, dataSource: 0 })
+        );
     } catch (e) { /* ok */ }
-}
-
-function displayUnitsForWatch() {
-    return settings.glucoseUnits === 'mmol' ? 'mmol' : 'mgdl';
 }
 
 function payloadGet(p, keyNum) {
@@ -74,49 +63,97 @@ function payloadGet(p, keyNum) {
     var k = keyNum | 0;
     if (p[k] !== undefined && p[k] !== null) return p[k];
     if (p[String(k)] !== undefined && p[String(k)] !== null) return p[String(k)];
+    // Named keys if platform expands messageKeys
+    if (keyNum === K.CMD_TYPE && p.KEY_CMD_TYPE != null) return p.KEY_CMD_TYPE;
+    if (keyNum === K.CMD_AMOUNT && p.KEY_CMD_AMOUNT != null) return p.KEY_CMD_AMOUNT;
     return undefined;
 }
 
+function sendStatus(text) {
+    var msg = {};
+    msg[K.CMD_STATUS] = String(text || '').substring(0, 63);
+    Pebble.sendAppMessage(
+        msg,
+        function () {
+            console.log('[TrioRemote] status → watch: ' + msg[K.CMD_STATUS]);
+        },
+        function (e) {
+            console.log('[TrioRemote] status send failed: ' + JSON.stringify(e));
+        }
+    );
+}
+
+/**
+ * POST JSON; callback(ok, statusCode, responseText).
+ * Non-2xx still returns body so the watch can show Trio error messages.
+ */
 function httpPost(url, body, callback) {
     var xhr = new XMLHttpRequest();
     xhr.open('POST', url, true);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.timeout = 15000;
     xhr.onload = function () {
-        callback(xhr.status >= 200 && xhr.status < 300 ? xhr.responseText : null);
+        callback(xhr.status >= 200 && xhr.status < 300, xhr.status, xhr.responseText || '');
     };
-    xhr.onerror = function () { callback(null); };
-    xhr.ontimeout = function () { callback(null); };
-    xhr.send(body);
+    xhr.onerror = function () {
+        callback(false, 0, '');
+    };
+    xhr.ontimeout = function () {
+        callback(false, -1, '');
+    };
+    try {
+        xhr.send(body);
+    } catch (e) {
+        console.log('[TrioRemote] xhr send exception ' + e);
+        callback(false, -2, String(e));
+    }
+}
+
+function statusFromResponse(ok, code, resp, fallbackOk) {
+    if (code === 0) return 'Trio unreachable';
+    if (code === -1) return 'Trio timeout';
+    if (code === -2) return 'HTTP error';
+    try {
+        var r = JSON.parse(resp || '{}');
+        if (r.message) return String(r.message);
+        if (r.error) return String(r.error);
+        if (r.status) return String(r.status);
+    } catch (e) { /* ignore */ }
+    if (ok) return fallbackOk || 'Sent';
+    return 'HTTP ' + code;
 }
 
 function sendCommand(type, amount) {
-    if (settings.dataSource !== 0 && settings.dataSource !== 3) {
-        var msg = {};
-        msg[K.CMD_STATUS] = 'Commands need Trio API';
-        Pebble.sendAppMessage(msg);
-        return;
-    }
+    normalizeTrioHost();
+    type = type | 0;
+    amount = amount | 0;
 
     var endpoint = type === 1 ? '/api/bolus' : '/api/carbs';
-    var body = type === 1
-        ? JSON.stringify({ units: amount / 10.0 })
-        : JSON.stringify({ grams: amount, absorptionHours: 3 });
+    var body =
+        type === 1
+            ? JSON.stringify({ units: amount / 10.0 })
+            : JSON.stringify({ grams: amount, absorptionHours: 3 });
 
-    httpPost(settings.trioHost + endpoint, body, function (resp) {
-        var statusMsg;
-        if (resp == null) {
-            statusMsg = 'Trio unreachable';
-        } else {
-            statusMsg = 'Sent';
-            try {
-                var r = JSON.parse(resp || '{}');
-                statusMsg = r.message || r.status || statusMsg;
-            } catch (e) { /* ok */ }
+    var url = settings.trioHost + endpoint;
+    console.log('[TrioRemote] POST ' + url + ' body=' + body);
+
+    sendStatus(type === 1 ? 'Sending bolus…' : 'Sending carbs…');
+
+    httpPost(url, body, function (ok, code, resp) {
+        console.log(
+            '[TrioRemote] POST result ok=' +
+                ok +
+                ' code=' +
+                code +
+                ' body=' +
+                String(resp).substring(0, 120)
+        );
+        var statusMsg = statusFromResponse(ok, code, resp, type === 1 ? 'Bolus OK' : 'Carbs OK');
+        // Map delivered → clearer watch text
+        if (statusMsg === 'delivered') {
+            statusMsg = type === 1 ? 'Bolus delivered' : 'Carbs delivered';
         }
-        var msg = {};
-        msg[K.CMD_STATUS] = statusMsg.substring(0, 63);
-        Pebble.sendAppMessage(msg);
+        sendStatus(statusMsg);
     });
 }
 
@@ -124,7 +161,12 @@ var TRIO_CONFIG_PAGE_URL =
     'https://minimusclawdius.github.io/trio-pebble/config/index.html';
 
 Pebble.addEventListener('showConfiguration', function () {
-    var params = encodeURIComponent(JSON.stringify(settings));
+    loadSettings();
+    var params = encodeURIComponent(JSON.stringify({
+        trioHost: settings.trioHost,
+        dataSource: 0
+    }));
+    console.log('[TrioRemote] open config host=' + settings.trioHost);
     Pebble.openURL(TRIO_CONFIG_PAGE_URL + '#' + params);
 });
 
@@ -132,27 +174,31 @@ Pebble.addEventListener('webviewclosed', function (e) {
     if (e && e.response) {
         try {
             var newSettings = JSON.parse(decodeURIComponent(e.response));
-            for (var key in newSettings) {
-                if (newSettings.hasOwnProperty(key)) settings[key] = newSettings[key];
-            }
+            if (newSettings.trioHost != null) settings.trioHost = newSettings.trioHost;
+            normalizeTrioHost();
+            settings.dataSource = 0;
             saveSettings();
+            console.log('[TrioRemote] config saved host=' + settings.trioHost);
+            sendStatus('Host ' + settings.trioHost.replace('http://', ''));
         } catch (ex) {
-            console.log('Trio Remote: config parse error: ' + ex);
+            console.log('[TrioRemote] config parse error: ' + ex);
         }
     }
 });
 
 Pebble.addEventListener('appmessage', function (e) {
-    var p = e.payload;
+    var p = e.payload || {};
+    console.log('[TrioRemote] appmessage keys=' + JSON.stringify(p));
     var cmdType = payloadGet(p, K.CMD_TYPE);
     var cmdAmt = payloadGet(p, K.CMD_AMOUNT);
     if (cmdType !== undefined && cmdAmt !== undefined) {
-        console.log('Trio Remote: cmd type=' + cmdType + ' amt=' + cmdAmt);
+        console.log('[TrioRemote] cmd type=' + cmdType + ' amt=' + cmdAmt);
         sendCommand(cmdType | 0, cmdAmt | 0);
     }
 });
 
 Pebble.addEventListener('ready', function () {
-    console.log('Trio Remote pkjs ready');
+    console.log('[TrioRemote] pkjs ready');
     loadSettings();
+    saveSettings();
 });

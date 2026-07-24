@@ -1,61 +1,44 @@
-# Trio Pebble Remote App
+# Trio Pebble Remote
 
-Companion watch app for the Trio Pebble CGM watchface. Use hardware buttons to send bolus/carb commands to Trio.
+Companion **watch app** (not a watchface) for bolus / carb entry into **Trio** via Rebble → HTTP `127.0.0.1`.
 
-## Quick Start
+## Requirements
 
-### Prerequisites
-- Pebble SDK 3 installed ([CloudPebble](https://cloudpebble.net) or local SDK)
-- Pebble watch connected
-- Phone with Rebble app
+- Trio iOS with **Pebble integration enabled** (local HTTP listening, default port **8080**)
+- Rebble app on the phone (PebbleKit JS must run)
+- Watchface **Trio Pebble** can stay installed; open **Trio Remote** to send commands
 
-### Local Build (No Docker)
+## Install (CloudPebble)
 
-```bash
-cd /home/jt/.openclaw/workspace/trio-pebble/remote-app
-pebble build
-pebble install --phone <your-phone-ip>
-```
-
-**Build output:** Creates `trio-pebble-remote.zip` for installation.
-
-### CloudPebble Build
-
-1. Go to [CloudPebble](https://cloudpebble.net)
-2. Import: `https://github.com/MinimusClawdius/trio-pebble-remote`
-3. Enable capabilities: **Configurable**, **Uses health**, **Uses location**
-4. Build and install
-
-## Installation
-
-After building:
-1. Open Rebble app on your phone
-2. Select your Pebble watch
-3. Find "Trio Remote" in the project list
-4. Install the `.zip` file
+1. Import `https://github.com/MinimusClawdius/trio-pebble-remote`
+2. Build → install on watch
+3. In Rebble, open **Trio Remote** settings once and confirm host is `http://127.0.0.1:8080` (or your Trio port)
 
 ## Usage
 
-- **UP/DOWN buttons:** Navigate menu
-- **SELECT (double-tap):** Confirm action
-- **BACK:** Exit
+1. Open **Trio Remote** on the watch (Quick Launch recommended)
+2. **Remote bolus** or **Remote carbs** → adjust → **SELECT** to send
+3. Status appears on the **Cancel** row (`Bolus delivered`, `Trio unreachable`, etc.)
+4. Trio applies immediately (no phone confirm queue UI required)
 
-Assign Trio Remote to a Quick Launch shortcut on your watch for quick access.
+## Flow
 
-## Architecture
+```
+Watch C  AppMessage(cmd)  →  phone pkjs  POST /api/bolus|/api/carbs  →  Trio loopback
+         ← status text    ←  HTTP result
+```
 
-- `main.c` - App lifecycle and menu logic
-- `remote_menu.c/.h` - Bolus/carb menu implementation
-- `pkjs/` - PebbleKit JS for data fetching
+## Troubleshooting
 
-## Configuration
+| Watch status | Meaning |
+|--------------|---------|
+| Trio unreachable | Trio suspended, integration off, or wrong port/host |
+| Trio timeout | Phone JS got no HTTP response in 15s |
+| Bolus delivered / Carbs delivered | Trio accepted and executed |
+| Phone link busy / Phone not ready | AppMessage outbox failed — reopen Remote, keep Rebble alive |
 
-- Menu icon: `resources/images/menu_icon.png` (25×25px PNG)
-- UUID: `fdd1d4b6-f2f2-4819-a26b-8ccad4264feb`
-- SDK version: 3
+Export **Settings → Services → Pebble → Export Pebble log** on Trio; look for `http_post` / `enact_bolus` / `store_carbs`.
 
-## Notes
+## Version
 
-- Only works with **Trio** as the data source
-- iPhone confirmation required for bolus commands
-- Not available with Dexcom Share or Nightscout
+1.2.0 — self-contained C (no missing headers), host normalize, clearer HTTP/status feedback.

@@ -2,10 +2,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Must match both package.json messageKeys and watchface trio_types.h */
+/* Must match package.json messageKeys and watchface trio_types.h */
 enum {
     KEY_CMD_TYPE = 7,
     KEY_CMD_AMOUNT = 8,
+    KEY_CMD_STATUS = 9,
 };
 
 static Window *s_menu_window;
@@ -22,15 +23,45 @@ static TextLayer *s_pick_hint;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
 
+static char s_last_status[64] = "";
+static bool s_command_pending = false;
+
+void remote_menu_set_status(const char *status) {
+    if (!status) {
+        s_last_status[0] = '\0';
+    } else {
+        strncpy(s_last_status, status, sizeof(s_last_status) - 1);
+        s_last_status[sizeof(s_last_status) - 1] = '\0';
+    }
+    s_command_pending = false;
+    APP_LOG(APP_LOG_LEVEL_INFO, "Remote status: %s", s_last_status[0] ? s_last_status : "(empty)");
+    if (s_menu_window && window_stack_contains_window(s_menu_window) && s_menu_layer) {
+        s_menu_items[2].title = "Cancel";
+        s_menu_items[2].subtitle = s_last_status[0] ? s_last_status : NULL;
+        layer_mark_dirty(simple_menu_layer_get_layer(s_menu_layer));
+    }
+}
+
 static void send_watch_command(int32_t cmd_type, int32_t amount) {
     DictionaryIterator *iter;
-    if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+    AppMessageResult begin = app_message_outbox_begin(&iter);
+    if (begin != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "Remote outbox_begin failed: %d", (int)begin);
         vibes_double_pulse();
+        remote_menu_set_status("Phone link busy");
         return;
     }
     dict_write_int32(iter, KEY_CMD_TYPE, cmd_type);
     dict_write_int32(iter, KEY_CMD_AMOUNT, amount);
-    app_message_outbox_send();
+    AppMessageResult sent = app_message_outbox_send();
+    if (sent != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "Remote outbox_send failed: %d", (int)sent);
+        vibes_double_pulse();
+        remote_menu_set_status("Send failed");
+        return;
+    }
+    APP_LOG(APP_LOG_LEVEL_INFO, "Remote sent cmd type=%ld amt=%ld", (long)cmd_type, (long)amount);
+    s_command_pending = true;
     vibes_short_pulse();
 }
 
@@ -152,7 +183,6 @@ static void open_amount_picker(int32_t cmd_type) {
 
 /**
  * Watch app: keep menu under picker so BACK from picker returns to menu.
- * (Watchface pops menu first so the face shows behind the picker.)
  */
 static void menu_select_cb(int index, void *context) {
     (void)context;
@@ -169,17 +199,17 @@ static void menu_window_load(Window *window) {
 
     s_menu_items[0] = (SimpleMenuItem){
         .title = "Remote bolus",
-        .subtitle = "0.1 U",
+        .subtitle = "0.1 U steps",
         .callback = menu_select_cb,
     };
     s_menu_items[1] = (SimpleMenuItem){
         .title = "Remote carbs",
-        .subtitle = "5 g",
+        .subtitle = "5 g steps",
         .callback = menu_select_cb,
     };
     s_menu_items[2] = (SimpleMenuItem){
-        .title = "Cancel",
-        .subtitle = NULL,
+        .title = s_command_pending ? "Waiting..." : "Cancel",
+        .subtitle = s_last_status[0] ? s_last_status : "Status after send",
         .callback = menu_select_cb,
     };
 
