@@ -17,9 +17,10 @@ Companion **watch app** (not a watchface) for bolus / carb entry into **Trio** v
 ## Usage
 
 1. Open **Trio Remote** on the watch (Quick Launch recommended)
-2. **Remote bolus** or **Remote carbs** → adjust → **SELECT** to send
-3. Status appears on the **Cancel** row (`Bolus delivered`, `Trio unreachable`, etc.)
-4. Trio applies immediately (no phone confirm queue UI required)
+2. **Bolus** or **Carbs** → UP/DOWN adjust amount → **SELECT**
+3. **Confirm screen** — read the amount, **SELECT again** to send (BACK edits amount)
+4. Status shows on the main menu footer (`Bolus delivered`, `Trio unreachable`, …)
+5. Trio applies on the phone after a successful POST (watch double-confirm is the safety gate)
 
 ## Flow
 
