@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Trio Remote</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0a0a0a;
+    color: #f2f2f2;
+    padding: 16px;
+    line-height: 1.35;
+  }
+  h1 { font-size: 1.35rem; margin-bottom: 4px; }
+  .sub { color: #9a9a9a; font-size: 0.85rem; margin-bottom: 18px; }
+  h2 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #8ab4ff;
+    margin: 18px 0 8px;
+  }
+  .card {
+    background: #161616;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 10px;
+  }
+  label {
+    display: block;
+    font-size: 0.8rem;
+    color: #bbb;
+    margin: 10px 0 4px;
+  }
+  label:first-child { margin-top: 0; }
+  input, select {
+    width: 100%;
+    font-size: 1.05rem;
+    padding: 12px 12px;
+    border-radius: 10px;
+    border: 1px solid #333;
+    background: #0f0f0f;
+    color: #fff;
+  }
+  .row2 {
+    display: grid;
+    grid-template-columns: 1fr 100px;
+    gap: 8px;
+  }
+  .hint { font-size: 0.78rem; color: #888; margin-top: 8px; }
+  .actions {
+    position: sticky;
+    bottom: 0;
+    padding: 14px 0 8px;
+    background: linear-gradient(transparent, #0a0a0a 30%);
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  button {
+    font-size: 1.05rem;
+    font-weight: 600;
+    padding: 14px;
+    border: none;
+    border-radius: 12px;
+  }
+  .save { background: #2f6fed; color: #fff; }
+  .cancel { background: #2a2a2a; color: #ddd; }
+</style>
+</head>
+<body>
+  <h1>Trio Remote</h1>
+  <p class="sub">Server + step sizes only. Watchface settings stay in the Trio watchface app.</p>
+
+  <h2>Trio local server</h2>
+  <div class="card">
+    <label for="host">Host / IP</label>
+    <input id="host" type="text" inputmode="url" autocomplete="off" placeholder="127.0.0.1">
+    <label for="port">Port</label>
+    <input id="port" type="number" inputmode="numeric" min="1024" max="65535" placeholder="8080">
+    <p class="hint">Phone loopback to Trio. Default <code>127.0.0.1:8080</code>. Must match Settings → Pebble in Trio.</p>
+  </div>
+
+  <h2>Bolus (units)</h2>
+  <div class="card">
+    <label for="bolusStep">UP/DOWN step</label>
+    <select id="bolusStep">
+      <option value="1">0.1 U</option>
+      <option value="2">0.2 U</option>
+      <option value="5">0.5 U</option>
+      <option value="10">1.0 U</option>
+    </select>
+    <label for="bolusDefault">Starting amount</label>
+    <select id="bolusDefault">
+      <option value="5">0.5 U</option>
+      <option value="10">1.0 U</option>
+      <option value="15">1.5 U</option>
+      <option value="20">2.0 U</option>
+      <option value="30">3.0 U</option>
+      <option value="50">5.0 U</option>
+    </select>
+  </div>
+
+  <h2>Carbs (grams)</h2>
+  <div class="card">
+    <label for="carbStep">UP/DOWN step</label>
+    <select id="carbStep">
+      <option value="1">1 g</option>
+      <option value="5">5 g</option>
+      <option value="10">10 g</option>
+      <option value="15">15 g</option>
+    </select>
+    <label for="carbDefault">Starting amount</label>
+    <select id="carbDefault">
+      <option value="5">5 g</option>
+      <option value="10">10 g</option>
+      <option value="15">15 g</option>
+      <option value="20">20 g</option>
+      <option value="30">30 g</option>
+      <option value="45">45 g</option>
+      <option value="60">60 g</option>
+    </select>
+  </div>
+
+  <div class="actions">
+    <button type="button" class="cancel" id="btnCancel">Cancel</button>
+    <button type="button" class="save" id="btnSave">Save</button>
+  </div>
+
+<script>
+(function () {
+  function parseHash() {
+    try {
+      var h = location.hash ? location.hash.substring(1) : '';
+      if (!h) return {};
+      return JSON.parse(decodeURIComponent(h));
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function hostParts(trioHost) {
+    var host = '127.0.0.1';
+    var port = '8080';
+    if (!trioHost) return { host: host, port: port };
+    var s = String(trioHost).replace(/^\s+|\s+$/g, '');
+    s = s.replace(/^https?:\/\//i, '');
+    s = s.replace(/\/.*$/, '');
+    var m = s.match(/^([^:]+):(\d+)$/);
+    if (m) {
+      host = m[1];
+      port = m[2];
+    } else if (s) {
+      host = s;
+    }
+    return { host: host, port: port };
+  }
+
+  function setSelect(id, value, fallback) {
+    var el = document.getElementById(id);
+    var v = String(value != null ? value : fallback);
+    for (var i = 0; i < el.options.length; i++) {
+      if (el.options[i].value === v) {
+        el.selectedIndex = i;
+        return;
+      }
+    }
+    el.value = String(fallback);
+  }
+
+  var s = parseHash();
+  var hp = hostParts(s.trioHost);
+  document.getElementById('host').value = hp.host;
+  document.getElementById('port').value = hp.port;
+  setSelect('bolusStep', s.bolusStepTenths, 1);
+  setSelect('bolusDefault', s.bolusDefaultTenths, 20);
+  setSelect('carbStep', s.carbStepGrams, 5);
+  setSelect('carbDefault', s.carbDefaultGrams, 15);
+
+  function closeConfig(returnTo) {
+    document.location = 'pebblejs://close#' + encodeURIComponent(JSON.stringify(returnTo));
+  }
+
+  document.getElementById('btnCancel').onclick = function () {
+    closeConfig({});
+  };
+
+  document.getElementById('btnSave').onclick = function () {
+    var host = (document.getElementById('host').value || '127.0.0.1').replace(/^\s+|\s+$/g, '');
+    var port = parseInt(document.getElementById('port').value, 10) || 8080;
+    if (port < 1024 || port > 65535) port = 8080;
+    host = host.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    if (!host) host = '127.0.0.1';
+
+    closeConfig({
+      trioHost: 'http://' + host + ':' + port,
+      bolusStepTenths: parseInt(document.getElementById('bolusStep').value, 10) || 1,
+      bolusDefaultTenths: parseInt(document.getElementById('bolusDefault').value, 10) || 20,
+      carbStepGrams: parseInt(document.getElementById('carbStep').value, 10) || 5,
+      carbDefaultGrams: parseInt(document.getElementById('carbDefault').value, 10) || 15
+    });
+  };
+})();
+</script>
+</body>
+</html>

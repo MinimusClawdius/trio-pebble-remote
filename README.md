@@ -29,6 +29,18 @@ Watch C  AppMessage(cmd)  →  phone pkjs  POST /api/bolus|/api/carbs  →  Trio
          ← status text    ←  HTTP result
 ```
 
+## Configuration
+
+Rebble → **Trio Remote** → settings (not the watchface page):
+
+| Setting | Purpose |
+|---------|---------|
+| Host / IP + Port | Trio loopback HTTP (default `127.0.0.1:8080`) |
+| Bolus step / starting amount | UP/DOWN step and initial bolus on the watch |
+| Carb step / starting amount | UP/DOWN step and initial carbs on the watch |
+
+Offline config HTML is embedded in the app (`config/index.html` → `pkjs/settings/generated.js`).
+
 ## Troubleshooting
 
 | Watch status | Meaning |

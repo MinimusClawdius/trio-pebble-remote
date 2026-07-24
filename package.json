@@ -1,7 +1,7 @@
 {
   "name": "Trio Remote",
-  "version": "1.3.0",
-  "description": "Trio bolus/carbs remote \u2014 companion watch app (use with Trio watchface)",
+  "version": "1.4.0",
+  "description": "Trio bolus/carbs remote — companion watch app (use with Trio watchface)",
   "author": "MinimusClawdius",
   "license": "MIT",
   "pebble": {
@@ -10,13 +10,7 @@
     "uuid": "fdd1d4b6-f2f2-4819-a26b-8ccad4264feb",
     "sdkVersion": "3",
     "enableMultiJS": true,
-    "targetPlatforms": [
-      "aplite",
-      "basalt",
-      "chalk",
-      "diorite",
-      "emery"
-    ],
+    "targetPlatforms": ["aplite", "basalt", "chalk", "diorite", "emery"],
     "watchapp": {
       "watchface": false
     },
@@ -33,10 +27,12 @@
     "messageKeys": {
       "KEY_CMD_TYPE": 7,
       "KEY_CMD_AMOUNT": 8,
-      "KEY_CMD_STATUS": 9
+      "KEY_CMD_STATUS": 9,
+      "KEY_BOLUS_STEP_TENTHS": 50,
+      "KEY_BOLUS_DEFAULT_TENTHS": 51,
+      "KEY_CARB_STEP_GRAMS": 52,
+      "KEY_CARB_DEFAULT_GRAMS": 53
     },
-    "capabilities": [
-      "configurable"
-    ]
+    "capabilities": ["configurable"]
   }
 }

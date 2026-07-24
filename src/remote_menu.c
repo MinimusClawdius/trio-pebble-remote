@@ -41,6 +41,65 @@ static bool s_command_pending = false;
 static char s_amount_buf[24];
 static char s_status_buf[72];
 
+/* Picker prefs (phone settings + watch persist) */
+enum {
+    PERSIST_BOLUS_STEP = 1,
+    PERSIST_BOLUS_DEFAULT = 2,
+    PERSIST_CARB_STEP = 3,
+    PERSIST_CARB_DEFAULT = 4
+};
+static int32_t s_bolus_step_tenths = 1;
+static int32_t s_bolus_default_tenths = 20;
+static int32_t s_carb_step_grams = 5;
+static int32_t s_carb_default_grams = 15;
+
+static void prefs_load_from_persist(void) {
+    if (persist_exists(PERSIST_BOLUS_STEP)) {
+        s_bolus_step_tenths = persist_read_int(PERSIST_BOLUS_STEP);
+    }
+    if (persist_exists(PERSIST_BOLUS_DEFAULT)) {
+        s_bolus_default_tenths = persist_read_int(PERSIST_BOLUS_DEFAULT);
+    }
+    if (persist_exists(PERSIST_CARB_STEP)) {
+        s_carb_step_grams = persist_read_int(PERSIST_CARB_STEP);
+    }
+    if (persist_exists(PERSIST_CARB_DEFAULT)) {
+        s_carb_default_grams = persist_read_int(PERSIST_CARB_DEFAULT);
+    }
+    if (s_bolus_step_tenths < 1) s_bolus_step_tenths = 1;
+    if (s_bolus_step_tenths > 50) s_bolus_step_tenths = 50;
+    if (s_bolus_default_tenths < 1) s_bolus_default_tenths = 20;
+    if (s_bolus_default_tenths > 300) s_bolus_default_tenths = 300;
+    if (s_carb_step_grams < 1) s_carb_step_grams = 5;
+    if (s_carb_step_grams > 50) s_carb_step_grams = 50;
+    if (s_carb_default_grams < 1) s_carb_default_grams = 15;
+    if (s_carb_default_grams > 250) s_carb_default_grams = 250;
+}
+
+void remote_menu_apply_prefs(int32_t bolus_step_tenths, int32_t bolus_default_tenths,
+                             int32_t carb_step_grams, int32_t carb_default_grams) {
+    if (bolus_step_tenths >= 1 && bolus_step_tenths <= 50) {
+        s_bolus_step_tenths = bolus_step_tenths;
+        persist_write_int(PERSIST_BOLUS_STEP, s_bolus_step_tenths);
+    }
+    if (bolus_default_tenths >= 1 && bolus_default_tenths <= 300) {
+        s_bolus_default_tenths = bolus_default_tenths;
+        persist_write_int(PERSIST_BOLUS_DEFAULT, s_bolus_default_tenths);
+    }
+    if (carb_step_grams >= 1 && carb_step_grams <= 50) {
+        s_carb_step_grams = carb_step_grams;
+        persist_write_int(PERSIST_CARB_STEP, s_carb_step_grams);
+    }
+    if (carb_default_grams >= 1 && carb_default_grams <= 250) {
+        s_carb_default_grams = carb_default_grams;
+        persist_write_int(PERSIST_CARB_DEFAULT, s_carb_default_grams);
+    }
+    APP_LOG(APP_LOG_LEVEL_INFO,
+            "Remote prefs: bolus step=%ld def=%ld carb step=%ld def=%ld",
+            (long)s_bolus_step_tenths, (long)s_bolus_default_tenths,
+            (long)s_carb_step_grams, (long)s_carb_default_grams);
+}
+
 static GFont font_title(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
@@ -217,9 +276,17 @@ static void picker_up_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount < 300) s_pick_amount++;
+        if (s_pick_amount + s_bolus_step_tenths <= 300) {
+            s_pick_amount += s_bolus_step_tenths;
+        } else {
+            s_pick_amount = 300;
+        }
     } else {
-        if (s_pick_amount < 250) s_pick_amount += 5;
+        if (s_pick_amount + s_carb_step_grams <= 250) {
+            s_pick_amount += s_carb_step_grams;
+        } else {
+            s_pick_amount = 250;
+        }
     }
     picker_refresh_value_text();
 }
@@ -228,9 +295,17 @@ static void picker_down_handler(ClickRecognizerRef recognizer, void *context) {
     (void)recognizer;
     (void)context;
     if (s_pick_cmd_type == 1) {
-        if (s_pick_amount > 1) s_pick_amount--;
+        if (s_pick_amount > s_bolus_step_tenths) {
+            s_pick_amount -= s_bolus_step_tenths;
+        } else {
+            s_pick_amount = s_bolus_step_tenths;
+        }
     } else {
-        if (s_pick_amount > 5) s_pick_amount -= 5;
+        if (s_pick_amount > s_carb_step_grams) {
+            s_pick_amount -= s_carb_step_grams;
+        } else {
+            s_pick_amount = s_carb_step_grams;
+        }
     }
     picker_refresh_value_text();
 }
@@ -285,7 +360,7 @@ static void pick_window_unload(Window *window) {
 
 static void open_amount_picker(int32_t cmd_type) {
     s_pick_cmd_type = cmd_type;
-    s_pick_amount = (cmd_type == 1) ? 20 : 15;
+    s_pick_amount = (cmd_type == 1) ? s_bolus_default_tenths : s_carb_default_grams;
 
     if (!s_pick_window) {
         s_pick_window = window_create();
@@ -413,6 +488,7 @@ static void menu_window_unload(Window *window) {
 }
 
 void remote_menu_init(void) {
+    prefs_load_from_persist();
     s_menu_window = window_create();
     window_set_window_handlers(s_menu_window, (WindowHandlers){
         .load = menu_window_load,
