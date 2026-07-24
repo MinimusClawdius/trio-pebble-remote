@@ -7,7 +7,8 @@ enum { KEY_CMD_STATUS = 9 };
 static void inbox_received(DictionaryIterator *iter, void *context) {
     (void)context;
     Tuple *t = dict_find(iter, KEY_CMD_STATUS);
-    if (t && t->type == TUPLE_CSTRING && t->value->cstring) {
+    /* cstring is a flexible array member — never compare it to NULL (Werror=address). */
+    if (t && t->type == TUPLE_CSTRING) {
         remote_menu_set_status(t->value->cstring);
     }
 }
