@@ -114,16 +114,8 @@ void remote_menu_apply_prefs(int32_t bolus_step_tenths, int32_t bolus_default_te
 }
 
 static GFont font_home_label(void) {
-#ifdef PBL_COLOR
-    /* Largest bold face available for button labels */
+    /* Bitham 42 Bold includes Latin letters — much larger than Gothic 28. */
     return fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD);
-#else
-    return fonts_get_system_font(FONT_KEY_BITHAM_34_MEDIUM_NUMBERS);
-#endif
-}
-
-static GFont font_home_label_fallback(void) {
-    return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
 static GFont font_amount_number(void) {
@@ -612,13 +604,19 @@ static void home_canvas_update(Layer *layer, GContext *ctx) {
 
         const char *label = (i == HOME_BOLUS) ? "Bolus" : "Carbs";
         graphics_context_set_text_color(ctx, ink);
-        /* ~75% of button height for the label */
-        int text_h = (f.size.h * 3) / 4;
+        /*
+         * Fill most of the pill with the largest letter font (Bitham 42).
+         * Centered in a tall box so glyphs aren't clipped top/bottom.
+         */
+        int text_h = 56;
+        if (text_h > f.size.h - 16) text_h = f.size.h - 16;
+        if (text_h < 42) text_h = f.size.h - 8;
         int text_y = f.origin.y + (f.size.h - text_h) / 2;
-        GRect text_box = GRect(f.origin.x + 6, text_y, f.size.w - 12, text_h);
-        /* Prefer Bitham; if letters look odd on some builds Gothic still large enough via box */
-        graphics_draw_text(ctx, label, font_home_label_fallback(), text_box,
-                           GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+        /* Optical vertical nudge — Bitham metrics sit slightly high */
+        text_y += 2;
+        GRect text_box = GRect(f.origin.x + 4, text_y, f.size.w - 8, text_h);
+        graphics_draw_text(ctx, label, font_home_label(), text_box,
+                           GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
     }
 }
 
