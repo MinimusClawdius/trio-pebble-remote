@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 #include "message_keys.auto.h"
+#include "send_anim.h"
 
 #ifndef MESSAGE_KEY_KEY_CMD_TYPE
 enum {
@@ -89,7 +90,7 @@ static int32_t s_carb_default_grams = 15;
 
 #define TAP_SLOP_PX 22
 #define SEND_TIMEOUT_MS 20000
-#define SPIN_MS 120
+#define SPIN_MS 180
 
 static void open_amount_picker(int32_t cmd_type);
 static void pick_adjust(int direction);
@@ -238,7 +239,7 @@ static void spin_timer_cb(void *data) {
     (void)data;
     s_spin_timer = NULL;
     if (s_progress_state != PROGRESS_SENDING) return;
-    s_spin_frame = (s_spin_frame + 1) % 8;
+    s_spin_frame = (s_spin_frame + 1) % SEND_ANIM_FRAMES;
     if (s_progress_canvas) layer_mark_dirty(s_progress_canvas);
     s_spin_timer = app_timer_register(SPIN_MS, spin_timer_cb, NULL);
 }
@@ -252,67 +253,57 @@ static void timeout_timer_cb(void *data) {
 
 static void progress_canvas_update(Layer *layer, GContext *ctx) {
     GRect b = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorBlack);
+    /* Light background / dark foreground throughout */
+    graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
 
     int cx = b.size.w / 2;
-    int cy = b.size.h / 2 - 20;
+    int anim_top = 18;
+    int anim_h = b.size.h / 2 + 10;
+    GRect anim_box = GRect(8, anim_top, b.size.w - 16, anim_h);
 
     if (s_progress_state == PROGRESS_SENDING) {
-        /* Animated arc spinner */
-        GRect ring = GRect(cx - 28, cy - 28, 56, 56);
-#ifdef PBL_COLOR
-        graphics_context_set_stroke_color(ctx, GColorDarkGray);
-#else
-        graphics_context_set_stroke_color(ctx, GColorWhite);
-#endif
-        graphics_context_set_stroke_width(ctx, 4);
-        graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
+        /* Frame sequence: syringe drip (bolus) or pizza face (carbs) */
+        if (s_pick_cmd_type == 1) {
+            send_anim_draw_syringe(ctx, anim_box, s_spin_frame);
+        } else {
+            send_anim_draw_pizza_face(ctx, anim_box, s_spin_frame);
+        }
 
-#ifdef PBL_COLOR
-        graphics_context_set_stroke_color(ctx, GColorGreen);
-#else
-        graphics_context_set_stroke_color(ctx, GColorWhite);
-#endif
-        graphics_context_set_stroke_width(ctx, 5);
-        int32_t start = (s_spin_frame * TRIG_MAX_ANGLE) / 8;
-        int32_t sweep = TRIG_MAX_ANGLE / 4;
-        graphics_draw_arc(ctx, ring, GOvalScaleModeFitCircle, start, start + sweep);
-
-        graphics_context_set_text_color(ctx, GColorWhite);
+        graphics_context_set_text_color(ctx, GColorBlack);
         graphics_draw_text(ctx, "Sending to Trio…", font_progress(),
-                           GRect(4, cy + 40, b.size.w - 8, 32),
+                           GRect(4, anim_top + anim_h + 4, b.size.w - 8, 30),
                            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
         if (s_progress_detail[0]) {
+            graphics_context_set_text_color(ctx, GColorDarkGray);
             graphics_draw_text(ctx, s_progress_detail, font_title(),
-                               GRect(4, cy + 72, b.size.w - 8, 28),
+                               GRect(4, anim_top + anim_h + 34, b.size.w - 8, 28),
                                GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
         }
     } else {
-        /* Error: X icon + message */
+        /* Error on light bg */
 #ifdef PBL_COLOR
         graphics_context_set_fill_color(ctx, GColorRed);
 #else
-        graphics_context_set_fill_color(ctx, GColorWhite);
+        graphics_context_set_fill_color(ctx, GColorBlack);
 #endif
-        GRect badge = GRect(cx - 30, cy - 40, 60, 60);
+        GRect badge = GRect(cx - 30, 28, 60, 60);
         graphics_fill_radial(ctx, badge, GOvalScaleModeFitCircle, 32, 0, TRIG_MAX_ANGLE);
 
-        graphics_context_set_stroke_color(ctx, GColorBlack);
+        graphics_context_set_stroke_color(ctx, GColorWhite);
         graphics_context_set_stroke_width(ctx, 5);
-        graphics_draw_line(ctx, GPoint(cx - 14, cy - 24), GPoint(cx + 14, cy + 4));
-        graphics_draw_line(ctx, GPoint(cx + 14, cy - 24), GPoint(cx - 14, cy + 4));
+        graphics_draw_line(ctx, GPoint(cx - 14, 44), GPoint(cx + 14, 72));
+        graphics_draw_line(ctx, GPoint(cx + 14, 44), GPoint(cx - 14, 72));
 
-        graphics_context_set_text_color(ctx, GColorWhite);
+        graphics_context_set_text_color(ctx, GColorBlack);
         graphics_draw_text(ctx, "Send failed", font_progress(),
-                           GRect(4, cy + 36, b.size.w - 8, 30),
+                           GRect(4, 100, b.size.w - 8, 30),
                            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
-#ifdef PBL_COLOR
-        graphics_context_set_text_color(ctx, GColorLightGray);
-#endif
+        graphics_context_set_text_color(ctx, GColorDarkGray);
         graphics_draw_text(ctx, s_progress_msg, font_error_msg(),
-                           GRect(8, cy + 68, b.size.w - 16, 56),
+                           GRect(8, 132, b.size.w - 16, 56),
                            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+        graphics_context_set_text_color(ctx, GColorBlack);
         graphics_draw_text(ctx, "BACK to exit", font_title(),
                            GRect(4, b.size.h - 36, b.size.w - 8, 28),
                            GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
@@ -341,7 +332,7 @@ static void progress_click_config(void *context) {
 static void progress_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
-    window_set_background_color(window, GColorBlack);
+    window_set_background_color(window, GColorWhite);
     s_progress_canvas = layer_create(b);
     layer_set_update_proc(s_progress_canvas, progress_canvas_update);
     layer_add_child(root, s_progress_canvas);
@@ -499,33 +490,37 @@ static void pick_layout(GRect b) {
 }
 
 static void draw_circle_button(GContext *ctx, GRect r, const char *label, bool pressed) {
+    /* Light ring buttons, dark labels */
 #ifdef PBL_COLOR
-    GColor fill = pressed ? GColorDarkGray : GColorDarkGreen;
+    GColor fill = pressed ? GColorMintGreen : GColorWhite;
 #else
-    GColor fill = pressed ? GColorDarkGray : GColorBlack;
+    GColor fill = pressed ? GColorLightGray : GColorWhite;
 #endif
     graphics_context_set_fill_color(ctx, fill);
     graphics_fill_radial(ctx, r, GOvalScaleModeFitCircle, (uint16_t)(r.size.w / 2 + 1), 0, TRIG_MAX_ANGLE);
-    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_context_set_stroke_width(ctx, pressed ? 4 : 3);
+    graphics_draw_arc(ctx, r, GOvalScaleModeFitCircle, 0, TRIG_MAX_ANGLE);
+    graphics_context_set_text_color(ctx, GColorBlack);
     GRect tb = grect_inset(r, GEdgeInsets(r.size.h / 2 - 18, 4, 4, 4));
     graphics_draw_text(ctx, label, font_pm(), tb, GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
 
 static void pick_canvas_update(Layer *layer, GContext *ctx) {
     GRect b = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
 
-    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_context_set_text_color(ctx, GColorBlack);
     const char *title = (s_pick_cmd_type == 1) ? "Bolus" : "Carbs";
     graphics_draw_text(ctx, title, font_title(), GRect(0, 4, b.size.w, 28),
                        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 
     format_amount_parts();
 #ifdef PBL_COLOR
-    graphics_context_set_text_color(ctx, GColorGreen);
+    graphics_context_set_text_color(ctx, GColorDarkGreen);
 #else
-    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_context_set_text_color(ctx, GColorBlack);
 #endif
     GRect num_box = s_pick_value_box;
     num_box.size.h = (s_pick_value_box.size.h * 2) / 3;
@@ -535,9 +530,7 @@ static void pick_canvas_update(Layer *layer, GContext *ctx) {
                            s_pick_value_box.size.h - num_box.size.h + 4);
     graphics_draw_text(ctx, s_num_buf, font_amount_number(), num_box,
                        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
-#ifdef PBL_COLOR
-    graphics_context_set_text_color(ctx, GColorLightGray);
-#endif
+    graphics_context_set_text_color(ctx, GColorDarkGray);
     graphics_draw_text(ctx, s_unit_buf, font_amount_unit(), unit_box,
                        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 
@@ -546,16 +539,15 @@ static void pick_canvas_update(Layer *layer, GContext *ctx) {
 
     bool send_p = (s_press_pick == PICK_SEND);
 #ifdef PBL_COLOR
-    graphics_context_set_fill_color(ctx, send_p ? GColorDarkGreen : GColorGreen);
+    graphics_context_set_fill_color(ctx, send_p ? GColorGreen : GColorMintGreen);
 #else
-    graphics_context_set_fill_color(ctx, send_p ? GColorDarkGray : GColorWhite);
+    graphics_context_set_fill_color(ctx, send_p ? GColorLightGray : GColorWhite);
 #endif
     graphics_fill_rect(ctx, s_pick_send, s_pick_send.size.h / 2, GCornersAll);
-#ifdef PBL_COLOR
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_context_set_stroke_width(ctx, 2);
+    graphics_draw_round_rect(ctx, s_pick_send, s_pick_send.size.h / 2);
     graphics_context_set_text_color(ctx, GColorBlack);
-#else
-    graphics_context_set_text_color(ctx, send_p ? GColorWhite : GColorBlack);
-#endif
     graphics_draw_text(ctx, "Send", font_send(),
                        grect_inset(s_pick_send, GEdgeInsets(s_pick_send.size.h / 2 - 16, 4, 4, 4)),
                        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
@@ -728,7 +720,7 @@ static void pick_window_load(Window *window) {
     layer_set_update_proc(s_pick_canvas, pick_canvas_update);
     layer_add_child(root, s_pick_canvas);
     window_set_click_config_provider(window, pick_click_config);
-    window_set_background_color(window, GColorBlack);
+    window_set_background_color(window, GColorWhite);
 }
 
 static void pick_window_unload(Window *window) {
@@ -766,27 +758,27 @@ static void home_layout(GRect bounds) {
 
 static void home_canvas_update(Layer *layer, GContext *ctx) {
     GRect b = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx, GColorWhite);
     graphics_fill_rect(ctx, b, 0, GCornerNone);
 
     for (int i = 0; i < HOME_COUNT; i++) {
         GRect f = s_home_btn[i];
         bool pressed = (s_press_home == i);
         bool focused = (s_focus_home == i);
+        /* Light mint pills, dark text */
 #ifdef PBL_COLOR
-        GColor fill = pressed ? GColorDarkGreen : GColorGreen;
+        GColor fill = pressed ? GColorMintGreen : GColorMintGreen;
+        if (pressed) fill = GColorGreen;
         GColor ink = GColorBlack;
 #else
-        GColor fill = pressed ? GColorDarkGray : GColorWhite;
-        GColor ink = pressed ? GColorWhite : GColorBlack;
+        GColor fill = pressed ? GColorLightGray : GColorWhite;
+        GColor ink = GColorBlack;
 #endif
         graphics_context_set_fill_color(ctx, fill);
         graphics_fill_rect(ctx, f, 14, GCornersAll);
-        if (focused && !pressed) {
-            graphics_context_set_stroke_color(ctx, GColorWhite);
-            graphics_context_set_stroke_width(ctx, 3);
-            graphics_draw_round_rect(ctx, grect_inset(f, GEdgeInsets(2)), 12);
-        }
+        graphics_context_set_stroke_color(ctx, GColorBlack);
+        graphics_context_set_stroke_width(ctx, focused || pressed ? 4 : 2);
+        graphics_draw_round_rect(ctx, f, 14);
         const char *label = (i == HOME_BOLUS) ? "Bolus" : "Carbs";
         graphics_context_set_text_color(ctx, ink);
         int text_h = 56;
@@ -846,7 +838,7 @@ static void home_window_load(Window *window) {
     home_layout(b);
     s_focus_home = HOME_BOLUS;
     s_press_home = -1;
-    window_set_background_color(window, GColorBlack);
+    window_set_background_color(window, GColorWhite);
     s_home_canvas = layer_create(b);
     layer_set_update_proc(s_home_canvas, home_canvas_update);
     layer_add_child(root, s_home_canvas);
