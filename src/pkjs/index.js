@@ -95,15 +95,30 @@ function payloadGet(p, keyNum) {
     var k = keyNum | 0;
     if (p[k] !== undefined && p[k] !== null) return p[k];
     if (p[String(k)] !== undefined && p[String(k)] !== null) return p[String(k)];
-    if (keyNum === K.CMD_TYPE && p.KEY_CMD_TYPE != null) return p.KEY_CMD_TYPE;
-    if (keyNum === K.CMD_AMOUNT && p.KEY_CMD_AMOUNT != null) return p.KEY_CMD_AMOUNT;
+    // Named keys (SDK messageKeys → JS)
+    if (keyNum === K.CMD_TYPE) {
+        if (p.KEY_CMD_TYPE != null) return p.KEY_CMD_TYPE;
+        if (p.key_cmd_type != null) return p.key_cmd_type;
+    }
+    if (keyNum === K.CMD_AMOUNT) {
+        if (p.KEY_CMD_AMOUNT != null) return p.KEY_CMD_AMOUNT;
+        if (p.key_cmd_amount != null) return p.key_cmd_amount;
+    }
     return undefined;
 }
 
 function sendStatus(text) {
     var msg = {};
     msg[K.CMD_STATUS] = String(text || '').substring(0, 63);
-    Pebble.sendAppMessage(msg);
+    Pebble.sendAppMessage(
+        msg,
+        function () {
+            console.log('[TrioRemote] status ok: ' + msg[K.CMD_STATUS]);
+        },
+        function (e) {
+            console.log('[TrioRemote] status fail: ' + JSON.stringify(e));
+        }
+    );
 }
 
 function pushPrefsToWatch() {
@@ -233,11 +248,28 @@ Pebble.addEventListener('webviewclosed', function (e) {
 
 Pebble.addEventListener('appmessage', function (e) {
     var p = e.payload || {};
+    console.log('[TrioRemote] appmessage raw=' + JSON.stringify(p));
     var cmdType = payloadGet(p, K.CMD_TYPE);
     var cmdAmt = payloadGet(p, K.CMD_AMOUNT);
+    // Fallback: scan payload for any pair that looks like type/amount ints
+    if (cmdType === undefined || cmdAmt === undefined) {
+        var keys = Object.keys(p);
+        for (var i = 0; i < keys.length; i++) {
+            var key = keys[i];
+            var val = p[key];
+            if ((key === '7' || key === 7 || String(key).indexOf('CMD_TYPE') >= 0) && cmdType === undefined) {
+                cmdType = val;
+            }
+            if ((key === '8' || key === 8 || String(key).indexOf('CMD_AMOUNT') >= 0) && cmdAmt === undefined) {
+                cmdAmt = val;
+            }
+        }
+    }
     if (cmdType !== undefined && cmdAmt !== undefined) {
         console.log('[TrioRemote] cmd type=' + cmdType + ' amt=' + cmdAmt);
         sendCommand(cmdType | 0, cmdAmt | 0);
+    } else {
+        console.log('[TrioRemote] ignored appmessage (no cmd pair)');
     }
 });
 
