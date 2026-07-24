@@ -1,6 +1,7 @@
 #include "remote_menu.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 /* Must match package.json messageKeys */
 enum {
@@ -10,24 +11,24 @@ enum {
 };
 
 enum {
-    MENU_BOLUS = 0,
-    MENU_CARBS = 1,
-    MENU_EXIT = 2,
-    MENU_COUNT = 3
+    BTN_BOLUS = 0,
+    BTN_CARBS = 1,
+    BTN_COUNT = 2
 };
 
-static Window *s_menu_window;
+static Window *s_home_window;
 static Window *s_pick_window;
 static Window *s_confirm_window;
 
-static TextLayer *s_menu_title;
-static TextLayer *s_menu_rows[MENU_COUNT];
-static TextLayer *s_menu_status;
-static int s_menu_index;
+static Layer *s_home_canvas;
+static TextLayer *s_home_status;
+static int s_focus_btn; /* hardware-button focus 0=bolus 1=carbs */
+static int s_press_btn; /* -1 none, else button under finger */
+static GRect s_btn_frame[BTN_COUNT];
 
 static TextLayer *s_pick_title;
-static TextLayer *s_pick_value;   /* giant number */
-static TextLayer *s_pick_unit;    /* U / g under number */
+static TextLayer *s_pick_value;
+static TextLayer *s_pick_unit;
 static TextLayer *s_pick_hint;
 static int32_t s_pick_cmd_type;
 static int32_t s_pick_amount;
@@ -43,6 +44,13 @@ static char s_num_buf[16];
 static char s_unit_buf[8];
 static char s_status_buf[72];
 
+/* Touch tap tracking */
+static bool s_touch_active;
+static int16_t s_touch_down_x;
+static int16_t s_touch_down_y;
+static int s_touch_down_btn;
+static bool s_touch_subscribed;
+
 enum {
     PERSIST_BOLUS_STEP = 1,
     PERSIST_BOLUS_DEFAULT = 2,
@@ -53,6 +61,8 @@ static int32_t s_bolus_step_tenths = 1;
 static int32_t s_bolus_default_tenths = 20;
 static int32_t s_carb_step_grams = 5;
 static int32_t s_carb_default_grams = 15;
+
+#define TAP_SLOP_PX 18
 
 static void prefs_load_from_persist(void) {
     if (persist_exists(PERSIST_BOLUS_STEP)) s_bolus_step_tenths = persist_read_int(PERSIST_BOLUS_STEP);
@@ -89,12 +99,11 @@ void remote_menu_apply_prefs(int32_t bolus_step_tenths, int32_t bolus_default_te
     }
 }
 
-/* Largest system faces suitable for safety-critical dosing UI */
 static GFont font_screen_title(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
-static GFont font_menu_row(void) {
+static GFont font_home_btn(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
 }
 
@@ -118,7 +127,6 @@ static GFont font_status(void) {
     return fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
 }
 
-/** Split dose into giant digits + unit label (Bitham/Roboto lack reliable U/g). */
 static void format_amount_parts(int32_t cmd_type, int32_t amount) {
     if (cmd_type == 1) {
         int v = (int)amount;
@@ -130,7 +138,7 @@ static void format_amount_parts(int32_t cmd_type, int32_t amount) {
     }
 }
 
-static void menu_refresh_highlight(void);
+static void open_amount_picker(int32_t cmd_type);
 
 void remote_menu_set_status(const char *status) {
     if (!status) {
@@ -140,13 +148,16 @@ void remote_menu_set_status(const char *status) {
         s_last_status[sizeof(s_last_status) - 1] = '\0';
     }
     s_command_pending = false;
-    if (s_menu_status) {
+    if (s_home_status) {
         if (s_last_status[0]) {
             snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_last_status);
         } else {
             snprintf(s_status_buf, sizeof(s_status_buf), " ");
         }
-        text_layer_set_text(s_menu_status, s_status_buf);
+        text_layer_set_text(s_home_status, s_status_buf);
+    }
+    if (s_home_canvas) {
+        layer_mark_dirty(s_home_canvas);
     }
 }
 
@@ -171,7 +182,25 @@ static void send_watch_command(int32_t cmd_type, int32_t amount) {
     vibes_short_pulse();
 }
 
-/* ---------- Confirm (2nd SELECT) ---------- */
+static int hit_test_button(int16_t x, int16_t y) {
+    GPoint p = GPoint(x, y);
+    for (int i = 0; i < BTN_COUNT; i++) {
+        if (grect_contains_point(&s_btn_frame[i], &p)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void activate_button(int btn) {
+    if (btn == BTN_BOLUS) {
+        open_amount_picker(1);
+    } else if (btn == BTN_CARBS) {
+        open_amount_picker(2);
+    }
+}
+
+/* ---------- Confirm ---------- */
 
 static void confirm_back(ClickRecognizerRef r, void *c) {
     (void)r;
@@ -200,7 +229,6 @@ static void confirm_window_load(Window *window) {
     GRect b = layer_get_bounds(root);
     const int w = b.size.w;
     const int h = b.size.h;
-    /* Fill screen: title, huge value, unit, hint — minimal dead space */
     const int title_h = 40;
     const int unit_h = 36;
     const int hint_h = 56;
@@ -343,7 +371,6 @@ static void pick_window_load(Window *window) {
     text_layer_set_text(s_pick_title, s_pick_cmd_type == 1 ? "BOLUS" : "CARBS");
     layer_add_child(root, text_layer_get_layer(s_pick_title));
 
-    /* Giant dose number — primary safety surface */
     s_pick_value = text_layer_create(GRect(2, value_y, w - 4, value_h));
     text_layer_set_background_color(s_pick_value, GColorClear);
     text_layer_set_text_alignment(s_pick_value, GTextAlignmentCenter);
@@ -389,136 +416,229 @@ static void open_amount_picker(int32_t cmd_type) {
     window_stack_push(s_pick_window, true);
 }
 
-/* ---------- Main menu — full-height rows ---------- */
+/* ---------- Home: two big buttons (+ touch) ---------- */
 
-static const char *menu_label(int i) {
-    switch (i) {
-        case MENU_BOLUS: return "BOLUS";
-        case MENU_CARBS: return "CARBS";
-        case MENU_EXIT: return "EXIT";
-        default: return "";
+static void home_canvas_update(Layer *layer, GContext *ctx) {
+    GRect b = layer_get_bounds(layer);
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, b, 0, GCornerNone);
+
+    for (int i = 0; i < BTN_COUNT; i++) {
+        GRect f = s_btn_frame[i];
+        bool pressed = (s_press_btn == i);
+        bool focused = (s_focus_btn == i);
+
+        GColor fill = pressed ? GColorBlack : GColorWhite;
+        GColor ink = pressed ? GColorWhite : GColorBlack;
+        graphics_context_set_fill_color(ctx, fill);
+        graphics_fill_rect(ctx, f, 8, GCornersAll);
+
+        graphics_context_set_stroke_color(ctx, GColorBlack);
+        graphics_context_set_stroke_width(ctx, focused || pressed ? 4 : 2);
+        graphics_draw_round_rect(ctx, f, 8);
+
+        const char *label = (i == BTN_BOLUS) ? "BOLUS" : "CARBS";
+        graphics_context_set_text_color(ctx, ink);
+        GRect text_box = grect_inset(f, GEdgeInsets(f.size.h / 2 - 18, 8, 8, 8));
+        graphics_draw_text(ctx, label, font_home_btn(), text_box,
+                           GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
     }
 }
 
-static void menu_refresh_highlight(void) {
-    for (int i = 0; i < MENU_COUNT; i++) {
-        if (!s_menu_rows[i]) continue;
-        if (i == s_menu_index) {
-            text_layer_set_background_color(s_menu_rows[i], GColorBlack);
-            text_layer_set_text_color(s_menu_rows[i], GColorWhite);
-        } else {
-            text_layer_set_background_color(s_menu_rows[i], GColorClear);
-            text_layer_set_text_color(s_menu_rows[i], GColorBlack);
-        }
-        text_layer_set_text(s_menu_rows[i], menu_label(i));
-    }
+static void home_layout_buttons(GRect bounds) {
+    const int status_h = 40;
+    const int gap = 10;
+    const int pad = 8;
+    int usable_h = bounds.size.h - status_h - pad * 2 - gap;
+    int btn_h = usable_h / 2;
+    int w = bounds.size.w - pad * 2;
+    s_btn_frame[BTN_BOLUS] = GRect(pad, pad, w, btn_h);
+    s_btn_frame[BTN_CARBS] = GRect(pad, pad + btn_h + gap, w, btn_h);
 }
 
-static void menu_up(ClickRecognizerRef r, void *c) {
+static void home_up(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    if (s_menu_index > 0) s_menu_index--;
-    menu_refresh_highlight();
+    s_focus_btn = BTN_BOLUS;
+    if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
-static void menu_down(ClickRecognizerRef r, void *c) {
+static void home_down(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    if (s_menu_index < MENU_COUNT - 1) s_menu_index++;
-    menu_refresh_highlight();
+    s_focus_btn = BTN_CARBS;
+    if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
-static void menu_select(ClickRecognizerRef r, void *c) {
+static void home_select(ClickRecognizerRef r, void *c) {
     (void)r;
     (void)c;
-    if (s_menu_index == MENU_EXIT) {
-        window_stack_pop(true);
+    activate_button(s_focus_btn);
+}
+
+static void home_back(ClickRecognizerRef r, void *c) {
+    (void)r;
+    (void)c;
+    window_stack_pop(true); /* leave app */
+}
+
+static void home_click_config(void *context) {
+    (void)context;
+    window_single_click_subscribe(BUTTON_ID_UP, home_up);
+    window_single_click_subscribe(BUTTON_ID_DOWN, home_down);
+    window_single_click_subscribe(BUTTON_ID_SELECT, home_select);
+    window_single_click_subscribe(BUTTON_ID_BACK, home_back);
+}
+
+#if defined(PBL_TOUCH)
+static void home_touch_handler(const TouchEvent *event, void *context) {
+    (void)context;
+    if (!event) return;
+    /* Only handle home while it is top window */
+    if (!s_home_window || window_stack_get_top_window() != s_home_window) {
         return;
     }
-    open_amount_picker(s_menu_index == MENU_BOLUS ? 1 : 2);
+
+    switch (event->type) {
+        case TouchEvent_Touchdown: {
+            s_touch_active = true;
+            s_touch_down_x = event->x;
+            s_touch_down_y = event->y;
+            s_touch_down_btn = hit_test_button(event->x, event->y);
+            s_press_btn = s_touch_down_btn;
+            if (s_press_btn >= 0) s_focus_btn = s_press_btn;
+            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+            break;
+        }
+        case TouchEvent_PositionUpdate: {
+            if (!s_touch_active) break;
+            int btn = hit_test_button(event->x, event->y);
+            /* cancel press highlight if finger leaves original button */
+            if (btn != s_touch_down_btn) {
+                s_press_btn = -1;
+            } else {
+                s_press_btn = btn;
+            }
+            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+            break;
+        }
+        case TouchEvent_Liftoff: {
+            if (!s_touch_active) break;
+            s_touch_active = false;
+            int dx = event->x - s_touch_down_x;
+            int dy = event->y - s_touch_down_y;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            int up_btn = hit_test_button(event->x, event->y);
+            bool is_tap = (dx <= TAP_SLOP_PX && dy <= TAP_SLOP_PX &&
+                           s_touch_down_btn >= 0 && up_btn == s_touch_down_btn);
+            s_press_btn = -1;
+            if (s_home_canvas) layer_mark_dirty(s_home_canvas);
+            if (is_tap) {
+                activate_button(s_touch_down_btn);
+            }
+            s_touch_down_btn = -1;
+            break;
+        }
+        default:
+            break;
+    }
+}
+#endif
+
+static void home_touch_subscribe_if_needed(void) {
+#if defined(PBL_TOUCH)
+    if (s_touch_subscribed) return;
+    if (!touch_service_is_enabled()) {
+        /* Still usable with side buttons */
+        return;
+    }
+    touch_service_subscribe(home_touch_handler, NULL);
+    s_touch_subscribed = true;
+#endif
 }
 
-static void menu_back(ClickRecognizerRef r, void *c) {
-    (void)r;
-    (void)c;
-    window_stack_pop(true);
+static void home_touch_unsubscribe_if_needed(void) {
+#if defined(PBL_TOUCH)
+    if (!s_touch_subscribed) return;
+    touch_service_unsubscribe();
+    s_touch_subscribed = false;
+#endif
 }
 
-static void menu_click_config(void *context) {
-    (void)context;
-    window_single_click_subscribe(BUTTON_ID_UP, menu_up);
-    window_single_click_subscribe(BUTTON_ID_DOWN, menu_down);
-    window_single_click_subscribe(BUTTON_ID_SELECT, menu_select);
-    window_single_click_subscribe(BUTTON_ID_BACK, menu_back);
+static void home_appear(Window *window) {
+    (void)window;
+    home_touch_subscribe_if_needed();
+    s_press_btn = -1;
+    if (s_home_canvas) layer_mark_dirty(s_home_canvas);
 }
 
-static void menu_window_load(Window *window) {
+static void home_disappear(Window *window) {
+    (void)window;
+    home_touch_unsubscribe_if_needed();
+    s_touch_active = false;
+    s_press_btn = -1;
+}
+
+static void home_window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect b = layer_get_bounds(root);
     const int w = b.size.w;
     const int h = b.size.h;
-    const int title_h = 40;
-    const int status_h = 44;
-    const int rows_area = h - title_h - status_h - 4;
-    const int row_h = rows_area / MENU_COUNT;
-    const int row_y0 = title_h + 2;
+    const int status_h = 40;
 
-    s_menu_title = text_layer_create(GRect(2, 2, w - 4, title_h));
-    text_layer_set_background_color(s_menu_title, GColorClear);
-    text_layer_set_text_alignment(s_menu_title, GTextAlignmentCenter);
-    text_layer_set_font(s_menu_title, font_screen_title());
-    text_layer_set_text(s_menu_title, "TRIO REMOTE");
-    layer_add_child(root, text_layer_get_layer(s_menu_title));
+    home_layout_buttons(b);
+    s_focus_btn = BTN_BOLUS;
+    s_press_btn = -1;
+    s_touch_down_btn = -1;
 
-    for (int i = 0; i < MENU_COUNT; i++) {
-        int y = row_y0 + i * row_h;
-        s_menu_rows[i] = text_layer_create(GRect(6, y, w - 12, row_h - 4));
-        text_layer_set_text_alignment(s_menu_rows[i], GTextAlignmentCenter);
-        text_layer_set_font(s_menu_rows[i], font_menu_row());
-        text_layer_set_overflow_mode(s_menu_rows[i], GTextOverflowModeTrailingEllipsis);
-        layer_add_child(root, text_layer_get_layer(s_menu_rows[i]));
-    }
+    s_home_canvas = layer_create(GRect(0, 0, w, h - status_h));
+    layer_set_update_proc(s_home_canvas, home_canvas_update);
+    layer_add_child(root, s_home_canvas);
 
-    s_menu_status = text_layer_create(GRect(4, h - status_h, w - 8, status_h - 2));
-    text_layer_set_background_color(s_menu_status, GColorClear);
-    text_layer_set_text_alignment(s_menu_status, GTextAlignmentCenter);
-    text_layer_set_font(s_menu_status, font_status());
+    s_home_status = text_layer_create(GRect(4, h - status_h, w - 8, status_h - 2));
+    text_layer_set_background_color(s_home_status, GColorClear);
+    text_layer_set_text_alignment(s_home_status, GTextAlignmentCenter);
+    text_layer_set_font(s_home_status, font_status());
     if (s_last_status[0]) {
         snprintf(s_status_buf, sizeof(s_status_buf), "%s", s_last_status);
     } else {
-        snprintf(s_status_buf, sizeof(s_status_buf), "Select dose type");
+#if defined(PBL_TOUCH)
+        snprintf(s_status_buf, sizeof(s_status_buf), "Tap BOLUS or CARBS");
+#else
+        snprintf(s_status_buf, sizeof(s_status_buf), "UP/DOWN + SELECT");
+#endif
     }
-    text_layer_set_text(s_menu_status, s_status_buf);
-    layer_add_child(root, text_layer_get_layer(s_menu_status));
+    text_layer_set_text(s_home_status, s_status_buf);
+    layer_add_child(root, text_layer_get_layer(s_home_status));
 
-    s_menu_index = 0;
-    menu_refresh_highlight();
-    window_set_click_config_provider(window, menu_click_config);
+    /* Buttons always available; touch is additive on capable hardware */
+    window_set_click_config_provider(window, home_click_config);
 }
 
-static void menu_window_unload(Window *window) {
+static void home_window_unload(Window *window) {
     (void)window;
-    text_layer_destroy(s_menu_title);
-    s_menu_title = NULL;
-    for (int i = 0; i < MENU_COUNT; i++) {
-        text_layer_destroy(s_menu_rows[i]);
-        s_menu_rows[i] = NULL;
-    }
-    text_layer_destroy(s_menu_status);
-    s_menu_status = NULL;
+    home_touch_unsubscribe_if_needed();
+    layer_destroy(s_home_canvas);
+    s_home_canvas = NULL;
+    text_layer_destroy(s_home_status);
+    s_home_status = NULL;
 }
 
 void remote_menu_init(void) {
     prefs_load_from_persist();
-    s_menu_window = window_create();
-    window_set_window_handlers(s_menu_window, (WindowHandlers){
-        .load = menu_window_load,
-        .unload = menu_window_unload,
+    s_home_window = window_create();
+    window_set_window_handlers(s_home_window, (WindowHandlers){
+        .load = home_window_load,
+        .unload = home_window_unload,
+        .appear = home_appear,
+        .disappear = home_disappear,
     });
-    window_stack_push(s_menu_window, true);
+    window_stack_push(s_home_window, true);
 }
 
 void remote_menu_deinit(void) {
+    home_touch_unsubscribe_if_needed();
     if (s_confirm_window) {
         window_destroy(s_confirm_window);
         s_confirm_window = NULL;
@@ -527,8 +647,8 @@ void remote_menu_deinit(void) {
         window_destroy(s_pick_window);
         s_pick_window = NULL;
     }
-    if (s_menu_window) {
-        window_destroy(s_menu_window);
-        s_menu_window = NULL;
+    if (s_home_window) {
+        window_destroy(s_home_window);
+        s_home_window = NULL;
     }
 }

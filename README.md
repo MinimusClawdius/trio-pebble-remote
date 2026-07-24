@@ -14,6 +14,14 @@ Companion **watch app** (not a watchface) for bolus / carb entry into **Trio** v
 2. Build → install on watch
 3. In Rebble, open **Trio Remote** settings once and confirm host is `http://127.0.0.1:8080` (or your Trio port)
 
+## Home screen
+
+Two large buttons: **BOLUS** (top) and **CARBS** (bottom).
+
+- **Touch** (Pebble Time 2 / platforms with `PBL_TOUCH`): tap a button
+- **Buttons**: UP/DOWN focus, SELECT open, **BACK exits** (no Exit row)
+- Status strip at the bottom shows send result
+
 ## Usage
 
 1. Open **Trio Remote** on the watch (Quick Launch recommended)
